@@ -10,6 +10,8 @@ repository = "https://github.com/leepokai/codync-network"
 readme = "README.md"
 keywords = ["agent", "p2p", "iroh", "mesh", "bots"]
 categories = ["network-programming"]
+# The mirror's CI, not part of the package.
+exclude = [".github"]
 
 [dependencies]
 anyhow = "1"

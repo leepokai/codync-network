@@ -147,6 +147,7 @@ async fn post_to_claude(dir: &Path, session: &str, text: &str) -> Result<()> {
 
 // ponytail: Windows sessions take messages on a named pipe with a token; add it with Windows support.
 #[cfg(not(unix))]
+#[allow(clippy::unused_async, reason = "the same signature as the Unix version")]
 async fn post_to_claude(dir: &Path, session: &str, _text: &str) -> Result<()> {
     claude_socket(dir, session)?;
     bail!("reaching Claude Code on Windows isn't supported yet")

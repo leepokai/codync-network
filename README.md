@@ -46,8 +46,31 @@ Requests and replies, rooms or shared task boards are patterns of letters, built
 
 ## Status
 
-0.1, developed inside Codync, whose host uses it to carry bot requests between the user's computers. The API will
-change. Messages into Claude Code sessions and the control socket work on macOS and Linux; Windows comes later.
+0.x, developed inside Codync, whose host uses it to carry bot requests between the user's computers, and mirrored
+here read-only. The API changes with Codync. Report issues here; send pull requests to
+[Codync's `dev` branch](https://github.com/leepokai/Codync) (`host/crates/network`). Messages into Claude Code
+sessions and the daemon's control socket work on macOS and Linux; on Windows the crate builds, and those come later.
+
+## Install
+
+The daemon and its command (`codync-network`), with Rust 1.91 or later:
+
+```sh
+cargo install codync-network
+```
+
+As a library:
+
+```sh
+cargo add codync-network
+```
+
+It builds iroh on rustls with ring. An app that already uses rustls with aws-lc-rs takes the other one, so the two
+aren't built in together (rustls then can't pick a provider by itself):
+
+```toml
+codync-network = { version = "0.1", default-features = false, features = ["tls-aws-lc-rs"] }
+```
 
 ## Try it
 

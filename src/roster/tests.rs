@@ -176,4 +176,11 @@ fn two_admins_naming_a_laptop_at_once_still_get_distinct_names() {
     assert_eq!(a.members(), b.members());
     assert_eq!((a.name(&laptop.public()), a.name(&other.public())), ("laptop".into(), "Laptop-2".into()));
     assert_eq!(a.find("laptop-2"), Some(other.public()));
+    // Removing the first laptop moves no one: the second stays laptop-2. A computer admitted later
+    // may take the freed name.
+    a.sign(&desk, 6, Change::Remove { id: laptop.public(), cascade: false }).unwrap();
+    assert_eq!(a.name(&other.public()), "Laptop-2");
+    let new = key();
+    a.sign(&desk, 7, Change::Admit { id: new.public(), name: "laptop".into() }).unwrap();
+    assert_eq!(a.name(&new.public()), "laptop");
 }

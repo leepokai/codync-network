@@ -153,6 +153,26 @@ async fn letters_for_an_away_computer_wait() {
 }
 
 #[tokio::test]
+async fn the_same_answer_to_two_letters_is_no_repeat() {
+    let (desk_dir, laptop_dir) = (temp_dir("desk3"), temp_dir("laptop3"));
+    let (desk, mut inbox) = Node::start(&desk_dir, &Connector::Private).await.unwrap();
+    desk.create("desk").unwrap();
+    offer(&desk, "lead");
+    let (laptop, _) = Node::start(&laptop_dir, &Connector::Private).await.unwrap();
+    offer(&laptop, "reviewer");
+    laptop.join(&desk.invite().unwrap(), "laptop").await.unwrap();
+    for request in ["a", "b"] {
+        laptop.send(Letter::new("reviewer", to("lead@desk"), "Done.").reply_to(request)).await.unwrap();
+        assert_eq!(next(&mut inbox).await.reply_to.as_deref(), Some(request));
+    }
+    let again = laptop.send(Letter::new("reviewer", to("lead@desk"), "Done.").reply_to("b")).await.unwrap_err();
+    assert!(again.to_string().contains("isn't delivered twice"), "{again}");
+    for dir in [desk_dir, laptop_dir] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[tokio::test]
 async fn without_a_network_agents_on_one_computer_still_reach_each_other() {
     let dir = temp_dir("alone");
     let (node, mut inbox) = Node::start(&dir, &Connector::Private).await.unwrap();

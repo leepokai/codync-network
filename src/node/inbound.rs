@@ -98,7 +98,8 @@ impl Inner {
         }
         let pair = format!("{peer}/{}>{}", envelope.from, envelope.to);
         let meta = envelope.meta.as_ref().map(ToString::to_string).unwrap_or_default();
-        let said = digest(&[&envelope.body, &meta]);
+        // Two answers to two different letters may well say the same thing ("Done.").
+        let said = digest(&[&envelope.body, &meta, envelope.reply_to.as_deref().unwrap_or_default()]);
         if let Err(reason) = locked(&self.guard).admit(pair.clone(), envelope.hops, said, Instant::now()) {
             return refuse(reason);
         }

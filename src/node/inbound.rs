@@ -4,7 +4,7 @@ use super::{Inner, check_name, locked};
 use crate::guard::digest;
 use crate::reach::Reach;
 use crate::roster::Change;
-use crate::types::{Address, Message};
+use crate::types::Message;
 use crate::wire::{self, Envelope, Request, Response};
 use anyhow::{Result, anyhow, bail};
 use iroh::EndpointId;
@@ -103,17 +103,7 @@ impl Inner {
         if let Err(reason) = locked(&self.guard).admit(pair.clone(), envelope.hops, said, Instant::now()) {
             return refuse(reason);
         }
-        let message = Message {
-            from: Address { agent: envelope.from, computer: name(&peer) },
-            id: envelope.id,
-            to: envelope.to,
-            body: envelope.body,
-            wake: envelope.wake,
-            reply_to: envelope.reply_to,
-            hops: envelope.hops,
-            meta: envelope.meta,
-        };
-        match self.hand_over(&reach, message).await {
+        match self.hand_over(&reach, envelope.open(name(&peer))).await {
             Ok(()) => {
                 let mut taken = locked(&self.taken);
                 if taken.len() >= TAKEN_MAX {

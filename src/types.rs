@@ -1,7 +1,7 @@
 //! The values an app hands the network and gets back from it.
 
 use crate::roster::Role;
-use crate::wire::{self, Agent};
+use crate::wire::{self, Agent, Envelope};
 use anyhow::{Result, anyhow, bail};
 use iroh::EndpointId;
 use serde_json::Value;
@@ -114,6 +114,12 @@ impl Letter {
         self.meta = Some(meta);
         self
     }
+
+    /// The letter as it goes on the wire: the receiving computer knows the sender by its key.
+    pub(crate) fn seal(self, sent_at: u64) -> Envelope {
+        let Self { id, from, to, body, wake, reply_to, hops, meta } = self;
+        Envelope { id, from, to: to.agent, body, wake, reply_to, hops, meta, sent_at }
+    }
 }
 
 /// A message that reached one of this computer's agents.
@@ -127,6 +133,14 @@ pub struct Message {
     pub reply_to: Option<String>,
     pub hops: u8,
     pub meta: Option<Value>,
+}
+
+impl Envelope {
+    /// The letter as the agent gets it, from the computer that sent it.
+    pub(crate) fn open(self, computer: String) -> Message {
+        let Self { id, from, to, body, wake, reply_to, hops, meta, sent_at: _ } = self;
+        Message { id, from: Address { agent: from, computer }, to, body, wake, reply_to, hops, meta }
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -24,7 +24,7 @@ struct Pair {
     tokens: f64,
     at: Instant,
     /// What it said last, and when.
-    last: (u64, Instant),
+    last: Option<(u64, Instant)>,
 }
 
 /// What a message says, for spotting repeats.
@@ -34,17 +34,26 @@ pub fn digest(parts: &[&str]) -> u64 {
     hasher.finish()
 }
 
+/// A chain of handoffs ends after [`MAX_HOPS`], on the sending computer and the receiving one.
+pub fn check_hops(hops: u8) -> Result<(), String> {
+    if hops > MAX_HOPS {
+        return Err(format!("this chain already had {MAX_HOPS} handoffs; ask your user before going on"));
+    }
+    Ok(())
+}
+
 impl Guard {
     pub fn admit(&mut self, pair: String, hops: u8, said: u64, now: Instant) -> Result<(), String> {
-        if hops > MAX_HOPS {
-            return Err(format!("this chain already had {MAX_HOPS} handoffs; ask your user before going on"));
-        }
+        check_hops(hops)?;
         // A pair quiet for this long says nothing a new one wouldn't.
         let forget = REFILL.mul_f64(BURST).max(REPEAT_WINDOW);
         self.pairs.retain(|_, p| now.duration_since(p.at) < forget);
-        let p = self.pairs.entry(pair).or_insert(Pair { tokens: BURST, at: now, last: (!said, now) });
-        if p.last.0 == said && now.duration_since(p.last.1) < REPEAT_WINDOW {
-            let ago = now.duration_since(p.last.1).as_secs();
+        let p = self.pairs.entry(pair).or_insert(Pair { tokens: BURST, at: now, last: None });
+        if let Some((last, at)) = p.last
+            && last == said
+            && now.duration_since(at) < REPEAT_WINDOW
+        {
+            let ago = now.duration_since(at).as_secs();
             return Err(format!("the same message arrived {ago}s ago; it isn't delivered twice"));
         }
         let refilled = now.duration_since(p.at).as_secs_f64() / REFILL.as_secs_f64();
@@ -55,14 +64,14 @@ impl Guard {
             return Err(format!("too many messages between these two agents; slow down (next one in {wait}s)"));
         }
         p.tokens -= 1.0;
-        p.last = (said, now);
+        p.last = Some((said, now));
         Ok(())
     }
 
     /// The last message couldn't be delivered: saying it again isn't a repeat.
     pub fn forget(&mut self, pair: &str) {
         if let Some(p) = self.pairs.get_mut(pair) {
-            p.last.0 = !p.last.0;
+            p.last = None;
         }
     }
 }

@@ -81,7 +81,8 @@ skips permission prompts holds messages from outside it for your approval, unles
 is `accept`.
 
 `--connector public|private|https://your-relay` picks the connector (default `public`), `--dir` the state folder
-(default `~/.codync/network`: the key in `secret.key`, the roster in `network.json`, the agents in `agents.json`).
+(default `~/.codync-network`: the key in `secret.key`, the roster in `network.json`, the agents in `agents.json`).
+A Codync host keeps its own node in `~/.codync/network`; never point two nodes at one folder.
 
 ## Use
 

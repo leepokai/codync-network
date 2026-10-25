@@ -10,6 +10,9 @@
 //! - every computer writes only where it is reachable.
 //!
 //! A removed computer stays removed: coming back means joining again with a new key.
+//!
+//! Every copy keeps only the entries that can count, so the whole log fits in the one frame a
+//! hello carries it in, whatever a stolen computer signs.
 
 use crate::wire;
 use anyhow::{Context, Result, anyhow, bail};
@@ -19,8 +22,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const FILE: &str = "network.json";
-/// Entries a copy may hold; one from far beyond that isn't a network of computers.
-const MAX_ENTRIES: usize = 20_000;
+/// Entries one computer may have in the log: far more changes than a network of computers makes,
+/// and few enough that the log stays well inside a frame.
+const MAX_PER_SIGNER: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -181,25 +185,57 @@ impl Roster {
         if other.network != self.network {
             return false;
         }
-        let before = self.log.len();
-        for entry in &other.log {
-            if self.log.len() >= MAX_ENTRIES {
-                break;
-            }
-            if !self.log.contains(entry) && entry.verifies(&self.network) {
-                self.log.insert(entry.clone());
-            }
-        }
-        if self.log.len() == before {
+        let new: Vec<Signed> =
+            other.log.iter().filter(|e| !self.log.contains(e) && e.verifies(&self.network)).cloned().collect();
+        if new.is_empty() {
             return false;
         }
+        let before = self.log.clone();
+        self.log.extend(new);
         self.rebuild();
-        true
+        self.log != before
+    }
+
+    /// Works out the members from the log, then drops the entries that can't count.
+    fn rebuild(&mut self) {
+        let known = self.count();
+        if self.compact(&known) {
+            self.count();
+        }
+    }
+
+    /// Drops what can't count, so the log stays small enough to send whole: entries by computers
+    /// the log never let in, changes to who is in by computers that may not make them, all but each
+    /// computer's newest location, and whatever a computer signed past its share. Returns whether
+    /// anything went.
+    fn compact(&mut self, known: &Known) -> bool {
+        let newest = newest_locations(&self.log);
+        let mut share: BTreeMap<EndpointId, usize> = BTreeMap::new();
+        let kept: BTreeSet<Signed> = self
+            .log
+            .iter()
+            .filter(|s| {
+                let counts = known.signers.contains(&s.by)
+                    && match &s.change {
+                        Change::Owner { .. } => s.by == self.network,
+                        Change::Locate { .. } => newest.get(&s.by).is_some_and(|(n, _)| *n == *s),
+                        _ => known.deciders.contains(&s.by),
+                    };
+                let n = share.entry(s.by).or_default();
+                *n += usize::from(counts);
+                counts && *n <= MAX_PER_SIGNER
+            })
+            .cloned()
+            .collect();
+        let changed = kept.len() != self.log.len();
+        self.log = kept;
+        changed
     }
 
     /// Works out the members from the log. Who may sign what depends only on entries from above
-    /// (root, then owner, then admins), so the result doesn't depend on arrival order.
-    fn rebuild(&mut self) {
+    /// (the root, then the owners, latest first, then admins), so the result doesn't depend on
+    /// arrival order. Returns who may have entries in the log.
+    fn count(&mut self) -> Known {
         let root = self.network;
         let log: Vec<&Signed> = self.log.iter().collect();
         // Owners in turn, each from the time the root named it.
@@ -216,41 +252,57 @@ impl Roster {
         let top = |by: &EndpointId, at: u64| *by == root || owner_at(at) == Some(*by);
         let owner = owners.last().map(|(_, id, _)| *id);
 
-        // Removals by the top, then admins with the time span they could sign in.
-        let removals = |may: &dyn Fn(&Signed, &EndpointId) -> bool| -> BTreeMap<EndpointId, (u64, bool)> {
-            let mut out: BTreeMap<EndpointId, (u64, bool)> = BTreeMap::new();
-            for s in &log {
+        // Removals by the top: the root's, then each owner's from the latest named back. An owner
+        // that one above it removed with `cascade` (a stolen one) removes nobody, whatever time it
+        // signs with, and only the root removes the current owner.
+        let mut above = vec![root];
+        for (_, id, _) in owners.iter().rev() {
+            if !above.contains(id) {
+                above.push(*id);
+            }
+        }
+        let mut top_removed: BTreeMap<EndpointId, (u64, bool)> = BTreeMap::new();
+        for by in &above {
+            if top_removed.get(by).is_some_and(|&(_, cascade)| cascade) {
+                continue;
+            }
+            for s in log.iter().filter(|s| s.by == *by && top(&s.by, s.at)) {
                 if let Change::Remove { id, cascade } = &s.change
-                    && may(s, id)
+                    && (s.by == root || (Some(*id) != owner_at(s.at) && Some(*id) != owner))
                 {
-                    let e = out.entry(*id).or_insert((s.at, *cascade));
-                    *e = (e.0.min(s.at), e.1 || *cascade);
+                    note_removal(&mut top_removed, *id, s.at, *cascade);
                 }
             }
-            out
-        };
-        let top_removed = removals(&|s, id| top(&s.by, s.at) && (s.by == root || Some(*id) != owner_at(s.at)));
+        }
+        let top_voided = |by: &EndpointId| top_removed.get(by).is_some_and(|&(_, cascade)| cascade);
         let mut promoted: BTreeMap<EndpointId, u64> = BTreeMap::new();
         for s in &log {
             if let Change::Promote { id } = &s.change
                 && top(&s.by, s.at)
+                && !top_voided(&s.by)
             {
                 let at = promoted.entry(*id).or_insert(s.at);
                 *at = (*at).min(s.at);
             }
         }
-        let signs_until = |id: &EndpointId, at: u64, from: u64, removed: &BTreeMap<EndpointId, (u64, bool)>| {
-            from <= at && removed.get(id).is_none_or(|&(until, cascade)| !cascade && at < until)
+        // Admins, within the time span they could sign in.
+        let admin_at = |id: &EndpointId, at: u64| {
+            promoted.get(id).is_some_and(|&from| {
+                from <= at && top_removed.get(id).is_none_or(|&(until, cascade)| !cascade && at < until)
+            })
         };
-        let admin_at =
-            |id: &EndpointId, at: u64| promoted.get(id).is_some_and(|&from| signs_until(id, at, from, &top_removed));
-        let admin_removed =
-            removals(&|s, id| admin_at(&s.by, s.at) && Some(*id) != owner_at(s.at) && !promoted.contains_key(id));
         let mut removed = top_removed.clone();
-        for (id, r) in &admin_removed {
-            removed.entry(*id).or_insert(*r);
+        for s in &log {
+            if let Change::Remove { id, cascade } = &s.change
+                && admin_at(&s.by, s.at)
+                && Some(*id) != owner_at(s.at)
+                && !promoted.contains_key(id)
+                && !top_removed.contains_key(id)
+            {
+                note_removal(&mut removed, *id, s.at, *cascade);
+            }
         }
-        // A cascade-removed owner voids what it signed as owner, too.
+        // A cascade-removed computer voids what it admitted, too.
         let voided = |by: &EndpointId| removed.get(by).is_some_and(|&(_, cascade)| cascade);
         let may_admit = |s: &Signed| !voided(&s.by) && (top(&s.by, s.at) || admin_at(&s.by, s.at));
 
@@ -265,15 +317,12 @@ impl Roster {
                 admitted.entry(*id).or_insert_with(|| name.clone());
             }
         }
-        let mut addrs: BTreeMap<EndpointId, (u64, EndpointAddr)> = BTreeMap::new();
-        for s in &log {
-            if let Change::Locate { addr } = &s.change
-                && addr.id == s.by
-                && addrs.get(&s.by).is_none_or(|(at, _)| s.at > *at)
-            {
-                addrs.insert(s.by, (s.at, addr.clone()));
-            }
-        }
+        let addrs = newest_locations(&self.log);
+        let tops = std::iter::once(root).chain(owners.iter().map(|(_, id, _)| *id));
+        let known = Known {
+            signers: tops.clone().chain(admitted.keys().copied()).collect(),
+            deciders: tops.chain(promoted.keys().copied()).collect(),
+        };
         self.removed = removed.keys().copied().collect();
         self.members = admitted
             .into_iter()
@@ -286,10 +335,11 @@ impl Roster {
                 } else {
                     Role::Member
                 };
-                let addr = addrs.remove(&id).map_or_else(|| EndpointAddr::new(id), |(_, a)| a);
+                let addr = addrs.get(&id).map_or_else(|| EndpointAddr::new(id), |(_, a)| (*a).clone());
                 (id, Member { name, role, addr })
             })
             .collect();
+        known
     }
 
     /// A copy that came from disk or another computer: only the entries that verify count.
@@ -297,7 +347,6 @@ impl Roster {
     pub fn verified(mut self) -> Self {
         let network = self.network;
         self.log.retain(|s| s.verifies(&network));
-        self.log = std::mem::take(&mut self.log).into_iter().take(MAX_ENTRIES).collect();
         self.rebuild();
         self
     }
@@ -320,6 +369,34 @@ impl Roster {
     }
 }
 
+/// Who may have entries in the log.
+struct Known {
+    /// The root, the owners and every computer the log let in (removed ones too).
+    signers: BTreeSet<EndpointId>,
+    /// Those that may change who is in: the root, the owners and the admins.
+    deciders: BTreeSet<EndpointId>,
+}
+
+/// Where each computer last said it is reachable: the entry and the address. Only that one counts.
+fn newest_locations(log: &BTreeSet<Signed>) -> BTreeMap<EndpointId, (&Signed, &EndpointAddr)> {
+    let mut newest: BTreeMap<EndpointId, (&Signed, &EndpointAddr)> = BTreeMap::new();
+    for s in log {
+        if let Change::Locate { addr } = &s.change
+            && addr.id == s.by
+            && newest.get(&s.by).is_none_or(|(n, _)| s.at > n.at)
+        {
+            newest.insert(s.by, (s, addr));
+        }
+    }
+    newest
+}
+
+/// Notes that `id` was removed at `at`: the earliest removal counts, and a cascade from any.
+fn note_removal(removed: &mut BTreeMap<EndpointId, (u64, bool)>, id: EndpointId, at: u64, cascade: bool) {
+    let e = removed.entry(id).or_insert((at, cascade));
+    *e = (e.0.min(at), e.1 || cascade);
+}
+
 /// The recovery code for a root key, and back.
 pub fn recovery_code(root: &SecretKey) -> String {
     let hex = wire::hex(&root.to_bytes());
@@ -335,118 +412,4 @@ pub fn root_from_code(code: &str) -> Result<SecretKey> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn key() -> SecretKey {
-        SecretKey::generate()
-    }
-
-    fn addr(k: &SecretKey) -> EndpointAddr {
-        EndpointAddr::new(k.public())
-    }
-
-    #[test]
-    fn the_owner_admits_admins_admit_members_cannot() {
-        let (desk, server, laptop, phone) = (key(), key(), key(), key());
-        let (mut r, _root) = Roster::create(&desk, "desk".into(), addr(&desk), 1);
-        assert_eq!(r.role(&desk.public()), Some(Role::Owner));
-        r.sign(&desk, 2, Change::Admit { id: server.public(), name: "server".into() }).unwrap();
-        r.sign(&desk, 3, Change::Promote { id: server.public() }).unwrap();
-        r.sign(&server, 4, Change::Admit { id: laptop.public(), name: "laptop".into() }).unwrap();
-        assert_eq!(r.role(&server.public()), Some(Role::Admin));
-        assert_eq!(r.role(&laptop.public()), Some(Role::Member));
-        // A plain member can neither admit nor remove.
-        assert!(r.sign(&laptop, 5, Change::Admit { id: phone.public(), name: "phone".into() }).is_err());
-        assert!(r.sign(&laptop, 5, Change::Remove { id: server.public(), cascade: false }).is_err());
-        // An admin can't remove another admin or the owner, and can't promote.
-        assert!(r.sign(&server, 6, Change::Remove { id: desk.public(), cascade: false }).is_err());
-        assert!(r.sign(&server, 6, Change::Promote { id: laptop.public() }).is_err());
-        r.sign(&server, 7, Change::Remove { id: laptop.public(), cascade: false }).unwrap();
-        assert!(!r.is_member(&laptop.public()) && r.is_removed(&laptop.public()));
-    }
-
-    #[test]
-    fn copies_converge_whatever_the_order() {
-        let (desk, server, laptop) = (key(), key(), key());
-        let (mut a, _root) = Roster::create(&desk, "desk".into(), addr(&desk), 1);
-        a.sign(&desk, 2, Change::Admit { id: server.public(), name: "server".into() }).unwrap();
-        let mut b = a.clone();
-        a.sign(&desk, 3, Change::Promote { id: server.public() }).unwrap();
-        // b hears of the promotion only after the admin's admission: once merged, both agree.
-        let mut early = a.clone();
-        early.sign(&server, 4, Change::Admit { id: laptop.public(), name: "laptop".into() }).unwrap();
-        b.log.extend(early.log.iter().filter(|s| s.by == server.public()).cloned());
-        b.rebuild();
-        assert!(!b.is_member(&laptop.public()), "not yet: b doesn't know server is an admin");
-        assert!(b.merge(&a));
-        assert!(b.is_member(&laptop.public()));
-        assert!(a.merge(&b));
-        assert_eq!(a.members(), b.members());
-        assert!(!a.merge(&b), "nothing new the second time");
-    }
-
-    #[test]
-    fn forged_or_foreign_entries_are_dropped() {
-        let (desk, mallory) = (key(), key());
-        let (mut r, _root) = Roster::create(&desk, "desk".into(), addr(&desk), 1);
-        let mut forged = r.clone();
-        let mut entry = Signed::new(&r.network, &mallory, 2, Change::Admit { id: mallory.public(), name: "m".into() });
-        entry.by = desk.public();
-        forged.log.insert(entry);
-        assert!(!r.merge(&forged));
-        let (other, _) = Roster::create(&mallory, "m".into(), addr(&mallory), 1);
-        assert!(!r.merge(&other));
-        assert_eq!(r.members().len(), 1);
-    }
-
-    #[test]
-    fn removing_a_stolen_admin_with_cascade_voids_its_admissions() {
-        let (desk, server, laptop, evil) = (key(), key(), key(), key());
-        let (mut r, _root) = Roster::create(&desk, "desk".into(), addr(&desk), 1);
-        r.sign(&desk, 2, Change::Admit { id: server.public(), name: "server".into() }).unwrap();
-        r.sign(&desk, 3, Change::Promote { id: server.public() }).unwrap();
-        r.sign(&server, 4, Change::Admit { id: laptop.public(), name: "laptop".into() }).unwrap();
-        r.sign(&server, 5, Change::Admit { id: evil.public(), name: "evil".into() }).unwrap();
-        let mut retired = r.clone();
-        retired.sign(&desk, 6, Change::Remove { id: server.public(), cascade: false }).unwrap();
-        assert!(retired.is_member(&laptop.public()), "retiring an admin keeps whom it admitted");
-        r.sign(&desk, 6, Change::Remove { id: server.public(), cascade: true }).unwrap();
-        assert!(!r.is_member(&evil.public()) && !r.is_member(&laptop.public()));
-    }
-
-    #[test]
-    fn the_recovery_code_moves_the_owner() {
-        let (desk, laptop) = (key(), key());
-        let (mut r, root) = Roster::create(&desk, "desk".into(), addr(&desk), 1);
-        r.sign(&desk, 2, Change::Admit { id: laptop.public(), name: "laptop".into() }).unwrap();
-        let code = recovery_code(&root);
-        let root = root_from_code(&code).unwrap();
-        r.sign(&root, 3, Change::Owner { id: laptop.public(), name: "laptop".into() }).unwrap();
-        r.sign(&laptop, 4, Change::Remove { id: desk.public(), cascade: false }).unwrap();
-        assert_eq!(r.role(&laptop.public()), Some(Role::Owner));
-        assert!(!r.is_member(&desk.public()));
-        assert!(root_from_code("nope").is_err());
-    }
-
-    #[test]
-    fn taken_names_get_a_number() {
-        let (desk, other) = (key(), key());
-        let (r, _) = Roster::create(&desk, "laptop".into(), addr(&desk), 1);
-        assert_eq!(r.free_name("laptop", &other.public()), "laptop-2");
-        assert_eq!(r.free_name("laptop", &desk.public()), "laptop");
-        assert_eq!(r.free_name("desk", &other.public()), "desk");
-    }
-
-    #[test]
-    fn a_computer_moves_itself_only() {
-        let (desk, laptop) = (key(), key());
-        let (mut r, _) = Roster::create(&desk, "desk".into(), addr(&desk), 1);
-        r.sign(&desk, 2, Change::Admit { id: laptop.public(), name: "laptop".into() }).unwrap();
-        let moved = addr(&laptop).with_ip_addr("10.0.0.2:1".parse().unwrap());
-        r.sign(&laptop, 3, Change::Locate { addr: moved.clone() }).unwrap();
-        assert_eq!(r.members()[&laptop.public()].addr, moved);
-        let fake = addr(&laptop).with_ip_addr("6.6.6.6:1".parse().unwrap());
-        assert!(r.sign(&desk, 4, Change::Locate { addr: fake }).is_err());
-    }
-}
+mod tests;

@@ -4,11 +4,11 @@ mod directory;
 mod inbound;
 mod outbox;
 
-use crate::guard::{Guard, MAX_HOPS};
+use crate::guard::{self, Guard};
 use crate::reach::{Held, Reach};
 use crate::roster::{self, Change, Role, Roster};
 use crate::types::{Address, Connector, Letter, Message, Peer, Sent};
-use crate::wire::{self, ALPN, Agent, Envelope, Request, Response, Ticket};
+use crate::wire::{self, ALPN, Agent, Request, Response, Ticket};
 use anyhow::{Context, Result, anyhow, bail};
 use iroh::endpoint::{Connection, presets};
 use iroh::protocol::Router;
@@ -220,33 +220,22 @@ impl Node {
         self.inner.resolve(name)
     }
 
+    /// Sends a letter from one of the agents this computer offers. An answer (`reply_to`) may also
+    /// come from one it no longer offers: renamed or gone while it worked, it still says how it ended.
     pub async fn send(&self, letter: Letter) -> Result<Sent> {
-        if !self.inner.offered().iter().any(|a| a.id == letter.from) {
+        if letter.reply_to.is_none() && !self.inner.offered().iter().any(|a| a.id == letter.from) {
             bail!("{} isn't one of this computer's agents", letter.from);
         }
-        if letter.hops > MAX_HOPS {
-            bail!("this chain already had {MAX_HOPS} handoffs; ask your user before going on");
-        }
+        guard::check_hops(letter.hops).map_err(anyhow::Error::msg)?;
         let roster = locked(&self.inner.roster).clone();
-        let local = roster.as_ref().is_none_or(|r| r.find(&letter.to.computer) == Some(self.id()));
         let id = match &roster {
-            _ if local => self.id(),
+            None => self.id(),
             Some(r) => {
                 r.find(&letter.to.computer).ok_or_else(|| anyhow!("no computer called {}", letter.to.computer))?
             }
-            None => unreachable!("no roster means local"),
         };
-        let envelope = Envelope {
-            id: letter.id,
-            from: letter.from,
-            to: letter.to.agent,
-            body: letter.body,
-            wake: letter.wake,
-            reply_to: letter.reply_to,
-            hops: letter.hops,
-            meta: letter.meta,
-            sent_at: wire::now_ms(),
-        };
+        let local = id == self.id();
+        let envelope = letter.seal(wire::now_ms());
         wire::check(&envelope)?;
         let name = |id: &EndpointId| roster.as_ref().map_or_else(|| "this computer".into(), |r| r.name(id));
         let answer = if local {

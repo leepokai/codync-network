@@ -244,8 +244,10 @@ impl Daemon {
     }
 }
 
+/// Its own folder: a Codync host on the same computer keeps its node in `~/.codync/network`, and
+/// two nodes with one key would each take the other's letters.
 fn default_dir() -> Option<PathBuf> {
-    std::env::home_dir().map(|h| h.join(".codync").join("network"))
+    std::env::home_dir().map(|h| h.join(".codync-network"))
 }
 
 fn load_agents(dir: &Path) -> Result<Vec<LocalAgent>> {

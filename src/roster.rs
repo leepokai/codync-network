@@ -27,7 +27,8 @@ const FILE: &str = "network.json";
 const MAX_PER_SIGNER: usize = 256;
 /// What one entry may hold, so no member can grow the log past what a hello carries.
 const MAX_ENTRY: usize = 8 * 1024;
-/// The addresses a location keeps: the relay first, then the direct ones.
+/// The addresses a location keeps: the relay first (`TransportAddr` orders relays before IP
+/// addresses), then the direct ones.
 const MAX_ADDRS: usize = 64;
 /// A computer's name (`node::check_name`'s 40) with the number `free_name` adds.
 const MAX_NAME: usize = 48;
@@ -96,11 +97,10 @@ pub enum Change {
     },
 }
 
-impl Change {
-    /// Where `addr` is reachable, cut to the addresses a location may hold.
-    pub fn locate(addr: EndpointAddr) -> Self {
-        Self::Locate { addr: EndpointAddr::from_parts(addr.id, addr.addrs.into_iter().take(MAX_ADDRS)) }
-    }
+/// `addr` cut to the addresses a location may hold: what this computer signs, and compares with
+/// the location it signed before.
+pub fn bounded_addr(addr: EndpointAddr) -> EndpointAddr {
+    EndpointAddr::from_parts(addr.id, addr.addrs.into_iter().take(MAX_ADDRS))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -156,7 +156,7 @@ impl Roster {
         let network = root.public();
         let mut roster = Self { network, log: BTreeSet::new(), members: BTreeMap::new(), removed: BTreeSet::new() };
         roster.log.insert(Signed::new(&network, &root, at, Change::Owner { id: me.public(), name }));
-        roster.log.insert(Signed::new(&network, me, at, Change::locate(addr)));
+        roster.log.insert(Signed::new(&network, me, at, Change::Locate { addr: bounded_addr(addr) }));
         roster.rebuild();
         (roster, root)
     }

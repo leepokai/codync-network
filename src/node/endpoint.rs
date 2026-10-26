@@ -2,7 +2,7 @@
 //! again whenever its addresses change.
 
 use super::{Inner, locked};
-use crate::roster::Change;
+use crate::roster::{Change, bounded_addr};
 use crate::types::Connector;
 use crate::wire;
 use anyhow::{Context, Result, anyhow};
@@ -19,12 +19,14 @@ const ADDR_SETTLE: Duration = Duration::from_secs(2);
 impl Inner {
     /// Writes where this computer is into the roster when it moved. Returns whether it did.
     pub(super) fn locate(&self, addr: EndpointAddr) -> Result<bool> {
+        // As signed: a computer with more addresses than a location holds hasn't moved each time.
+        let addr = bounded_addr(addr);
         let mut guard = locked(&self.roster);
         let Some(roster) = guard.as_mut() else { return Ok(false) };
         if roster.members().get(&self.me()).is_none_or(|m| m.addr == addr) {
             return Ok(false);
         }
-        roster.sign(self.endpoint.secret_key(), wire::now_ms(), Change::locate(addr))?;
+        roster.sign(self.endpoint.secret_key(), wire::now_ms(), Change::Locate { addr })?;
         self.save(roster)?;
         Ok(true)
     }

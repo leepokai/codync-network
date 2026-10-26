@@ -238,8 +238,8 @@ impl Daemon {
     }
 
     fn add(&self, local: LocalAgent) -> Result<String> {
-        if local.agent.id == TERMINAL || local.agent.id.contains(['/', ' ']) {
-            bail!("pick another agent name (not {TERMINAL}, no spaces or /)");
+        if local.agent.id == TERMINAL || local.agent.id.contains(['/', ' ']) || local.agent.id.len() > 64 {
+            bail!("pick another agent name (not {TERMINAL}, at most 64 characters, no spaces or /)");
         }
         let id = local.agent.id.clone();
         let mut agents = self.agents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

@@ -135,11 +135,14 @@ fn entries_out_of_bounds_dont_count_and_a_removed_computer_has_no_location() {
     assert!(!r.merge(&junk), "nothing out of bounds counts");
     assert_eq!(r.members().len(), 3);
     assert!(serde_json::to_vec(&r).unwrap().len() < size + 1024);
-    // Its own location is cut to what one may hold, and counts.
-    r.sign(&laptop, 6, Change::locate(huge)).unwrap();
+    // Its own location is cut to what one may hold, and counts; signing the same again changes
+    // nothing, so a computer compares where it is with what it signed, cut the same way.
+    r.sign(&laptop, 6, Change::Locate { addr: bounded_addr(huge.clone()) }).unwrap();
+    assert_eq!(r.members()[&laptop.public()].addr, bounded_addr(huge.clone()));
     assert_eq!(r.members()[&laptop.public()].addr.addrs.len(), MAX_ADDRS);
+    assert!(r.sign(&laptop, 7, Change::Locate { addr: bounded_addr(huge) }).is_err());
     // Once laptop is removed, where it was goes too.
-    r.sign(&desk, 7, Change::Remove { id: laptop.public(), cascade: false }).unwrap();
+    r.sign(&desk, 8, Change::Remove { id: laptop.public(), cascade: false }).unwrap();
     assert!(!r.log.iter().any(|s| s.by == laptop.public() && matches!(s.change, Change::Locate { .. })));
 }
 

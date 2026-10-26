@@ -16,13 +16,39 @@ pub(super) struct Seen {
 
 /// The computer name an address uses for this one before it is in a network.
 const LOCAL: &str = "local";
+/// What another computer's offer may hold before the rest is left out: these show in every app
+/// and in agents' prompts.
+const MAX_AGENTS: usize = 200;
+const MAX_AGENT_NAME: usize = 80;
+const MAX_ABOUT: usize = 1024;
+
+/// Another computer's agents within bounds: the first [`MAX_AGENTS`] with an id a letter can
+/// carry, their names and descriptions cut to length.
+fn bounded(agents: Vec<Agent>) -> Vec<Agent> {
+    let cut = |text: &mut String, max: usize| {
+        if text.len() > max {
+            let end = (0..=max).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
+            text.truncate(end);
+        }
+    };
+    agents
+        .into_iter()
+        .filter(|a| !a.id.is_empty() && a.id.len() <= crate::wire::MAX_ID)
+        .take(MAX_AGENTS)
+        .map(|mut a| {
+            cut(&mut a.name, MAX_AGENT_NAME);
+            cut(&mut a.about, MAX_ABOUT);
+            a
+        })
+        .collect()
+}
 
 impl Inner {
     /// Notes that `id` answered with `agents`, or (`None`) that it didn't.
     pub(super) fn saw(&self, id: EndpointId, agents: Option<Vec<Agent>>) {
         let mut seen = locked(&self.seen);
         let changed = if let Some(agents) = agents {
-            let now = Seen { agents, answered: true };
+            let now = Seen { agents: bounded(agents), answered: true };
             seen.insert(id, now.clone()).is_none_or(|before| before != now)
         } else {
             let heard = seen.entry(id).or_insert(Seen { agents: Vec::new(), answered: false });
@@ -93,5 +119,23 @@ impl Inner {
                 bail!("more than one agent is called {name}: {}; use the full address", names.join(", "))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire::AgentKind;
+
+    #[test]
+    fn another_computers_offer_is_cut_to_bounds() {
+        let agent = |id: String, name: String, about: String| Agent { id, name, about, kind: AgentKind::Codync };
+        let mut offer = vec![agent("x".repeat(65), "an id no letter carries".into(), String::new())];
+        offer.extend((0..300).map(|n| agent(format!("bot-{n}"), "é".repeat(100), "a".repeat(5000))));
+        let kept = bounded(offer);
+        assert_eq!(kept.len(), MAX_AGENTS);
+        assert_eq!(kept[0].id, "bot-0");
+        assert!(kept[0].name.len() <= MAX_AGENT_NAME && kept[0].name.chars().all(|c| c == 'é'));
+        assert_eq!(kept[0].about.len(), MAX_ABOUT);
     }
 }

@@ -25,6 +25,14 @@ const FILE: &str = "network.json";
 /// Entries one computer may have in the log: far more changes than a network of computers makes,
 /// and few enough that the log stays well inside a frame.
 const MAX_PER_SIGNER: usize = 256;
+/// What one entry may hold, so no member can grow the log past what a hello carries.
+const MAX_ENTRY: usize = 8 * 1024;
+/// The addresses a location keeps: the relay first, then the direct ones.
+const MAX_ADDRS: usize = 64;
+/// A computer's name (`node::check_name`'s 40) with the number `free_name` adds.
+const MAX_NAME: usize = 48;
+/// What a computer's name never holds: they'd break `agent@computer.network`.
+pub(crate) const NOT_IN_NAMES: [char; 4] = ['/', ' ', '@', '.'];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,6 +96,13 @@ pub enum Change {
     },
 }
 
+impl Change {
+    /// Where `addr` is reachable, cut to the addresses a location may hold.
+    pub fn locate(addr: EndpointAddr) -> Self {
+        Self::Locate { addr: EndpointAddr::from_parts(addr.id, addr.addrs.into_iter().take(MAX_ADDRS)) }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Signed {
     /// When it was signed (Unix ms), as its signer says.
@@ -141,7 +156,7 @@ impl Roster {
         let network = root.public();
         let mut roster = Self { network, log: BTreeSet::new(), members: BTreeMap::new(), removed: BTreeSet::new() };
         roster.log.insert(Signed::new(&network, &root, at, Change::Owner { id: me.public(), name }));
-        roster.log.insert(Signed::new(&network, me, at, Change::Locate { addr }));
+        roster.log.insert(Signed::new(&network, me, at, Change::locate(addr)));
         roster.rebuild();
         (roster, root)
     }
@@ -223,11 +238,13 @@ impl Roster {
         }
     }
 
-    /// Drops what can't count, so the log stays small enough to send whole: entries by computers
-    /// the log never let in, changes to who is in by computers that may not make them, all but each
-    /// computer's newest location, and whatever a computer signed past its share. Returns whether
-    /// anything went.
+    /// Drops what can't count, so the log stays small enough to send whole: entries out of bounds,
+    /// entries by computers the log never let in, changes to who is in by computers that may not
+    /// make them, all but each computer's newest location (and none of a removed one's), and
+    /// whatever a computer signed past its share. Returns whether anything went.
     fn compact(&mut self, known: &Known) -> bool {
+        let before = self.log.len();
+        self.log.retain(bounded);
         let newest = newest_locations(&self.log);
         let mut share: BTreeMap<EndpointId, usize> = BTreeMap::new();
         let kept: BTreeSet<Signed> = self
@@ -237,7 +254,9 @@ impl Roster {
                 let counts = known.signers.contains(&s.by)
                     && match &s.change {
                         Change::Owner { .. } => s.by == self.network,
-                        Change::Locate { .. } => newest.get(&s.by).is_some_and(|(n, _)| *n == *s),
+                        Change::Locate { .. } => {
+                            !self.removed.contains(&s.by) && newest.get(&s.by).is_some_and(|(n, _)| *n == *s)
+                        }
                         _ => known.deciders.contains(&s.by),
                     };
                 let n = share.entry(s.by).or_default();
@@ -246,7 +265,7 @@ impl Roster {
             })
             .cloned()
             .collect();
-        let changed = kept.len() != self.log.len();
+        let changed = kept.len() != before;
         self.log = kept;
         changed
     }
@@ -399,6 +418,19 @@ struct Known {
     signers: BTreeSet<EndpointId>,
     /// Those that may change who is in: the root, the owners and the admins.
     deciders: BTreeSet<EndpointId>,
+}
+
+/// Whether an entry is within bounds: a name a computer may have, a location's few addresses, and
+/// a few KiB in all. Anything past them can't count, whoever signed it.
+fn bounded(s: &Signed) -> bool {
+    let fits = match &s.change {
+        Change::Owner { name, .. } | Change::Admit { name, .. } => {
+            !name.is_empty() && name.len() <= MAX_NAME && !name.contains(NOT_IN_NAMES)
+        }
+        Change::Locate { addr } => addr.addrs.len() <= MAX_ADDRS,
+        Change::Promote { .. } | Change::Remove { .. } => true,
+    };
+    fits && serde_json::to_vec(s).is_ok_and(|bytes| bytes.len() <= MAX_ENTRY)
 }
 
 /// Where each computer last said it is reachable: the entry and the address. Only that one counts.

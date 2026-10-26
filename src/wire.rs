@@ -14,6 +14,10 @@ use std::fmt::Write;
 pub const ALPN: &[u8] = b"codync-network/0";
 pub const MAX_BODY: usize = 64 * 1024;
 const MAX_META: usize = 16 * 1024;
+/// The longest `from`, `to` and `reply_to`: an agent's address name (or `agent-<name>`), a letter id.
+const MAX_ADDRESS: usize = 128;
+/// The longest letter id (`random_hex(12)` makes 24).
+pub(crate) const MAX_ID: usize = 64;
 const MAX_FRAME: usize = 1024 * 1024;
 const TICKET_PREFIX: &str = "codync-network:";
 
@@ -193,12 +197,41 @@ pub fn check(envelope: &Envelope) -> Result<()> {
     if envelope.meta.as_ref().is_some_and(|m| m.to_string().len() > MAX_META) {
         bail!("a message's meta is at most {MAX_META} bytes");
     }
+    let addresses = [Some(&envelope.from), Some(&envelope.to), envelope.reply_to.as_ref()];
+    if envelope.id.is_empty()
+        || envelope.id.len() > MAX_ID
+        || addresses.into_iter().flatten().any(|a| a.len() > MAX_ADDRESS)
+    {
+        bail!("a message's id is 1–{MAX_ID} bytes and its addresses at most {MAX_ADDRESS}");
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_letters_id_and_addresses_have_bounds() {
+        let letter = |id: &str, from: String| Envelope {
+            id: id.into(),
+            from,
+            to: "reviewer".into(),
+            body: "hi".into(),
+            wake: true,
+            reply_to: None,
+            hops: 0,
+            meta: None,
+            sent_at: 0,
+        };
+        assert!(check(&letter(&random_hex(12), "agent-lead".into())).is_ok());
+        assert!(check(&letter(&random_hex(12), "x".repeat(1 << 20))).is_err());
+        assert!(check(&letter(&"a".repeat(100), "lead".into())).is_err());
+        assert!(check(&letter("", "lead".into())).is_err());
+        let mut reply = letter(&random_hex(12), "lead".into());
+        reply.reply_to = Some("r".repeat(MAX_ADDRESS + 1));
+        assert!(check(&reply).is_err());
+    }
 
     #[test]
     fn tickets_round_trip_and_reject_garbage() {

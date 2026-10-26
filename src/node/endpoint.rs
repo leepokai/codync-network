@@ -24,7 +24,7 @@ impl Inner {
         if roster.members().get(&self.me()).is_none_or(|m| m.addr == addr) {
             return Ok(false);
         }
-        roster.sign(self.endpoint.secret_key(), wire::now_ms(), Change::Locate { addr })?;
+        roster.sign(self.endpoint.secret_key(), wire::now_ms(), Change::locate(addr))?;
         self.save(roster)?;
         Ok(true)
     }

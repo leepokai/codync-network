@@ -177,7 +177,7 @@ impl Node {
                 }
                 // Where this computer is; nothing to add when it knows no address yet.
                 let addr = self.inner.endpoint.addr();
-                let _ = roster.sign(self.inner.endpoint.secret_key(), wire::now_ms(), Change::Locate { addr });
+                let _ = roster.sign(self.inner.endpoint.secret_key(), wire::now_ms(), Change::locate(addr));
                 // Held across saving and keeping it, so whoever `changes` wakes sees it.
                 let mut guard = locked(&self.inner.roster);
                 self.inner.save(&roster)?;
@@ -482,7 +482,7 @@ impl Inner {
 
 fn check_name(name: &str) -> Result<String> {
     let name = name.trim();
-    if name.is_empty() || name.len() > 40 || name.contains(['/', ' ', '@', '.']) {
+    if name.is_empty() || name.len() > 40 || name.contains(roster::NOT_IN_NAMES) {
         bail!("a computer's name is 1–40 characters, without spaces, /, @ or .");
     }
     Ok(name.into())

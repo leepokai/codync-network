@@ -113,6 +113,37 @@ fn a_computer_moves_itself_only() {
 }
 
 #[test]
+fn entries_out_of_bounds_dont_count_and_a_removed_computer_has_no_location() {
+    let (desk, laptop, admin) = (key(), key(), key());
+    let (mut r, _) = Roster::create(&desk, "desk".into(), addr(&desk), 1);
+    r.sign(&desk, 2, Change::Admit { id: laptop.public(), name: "laptop".into() }).unwrap();
+    r.sign(&desk, 3, Change::Admit { id: admin.public(), name: "server".into() }).unwrap();
+    r.sign(&desk, 4, Change::Promote { id: admin.public() }).unwrap();
+    let size = serde_json::to_vec(&r).unwrap().len();
+    // Forty thousand addresses would push every hello past its frame; a name no computer may take.
+    let huge = (0..40_000u32).fold(addr(&laptop), |a, n| {
+        let [_, b, c, d] = n.to_be_bytes();
+        a.with_ip_addr(std::net::SocketAddr::from(([10, b, c, d], 1)))
+    });
+    let mut junk = r.clone();
+    junk.log.insert(Signed::new(&r.network, &laptop, 5, Change::Locate { addr: huge.clone() }));
+    let stranger = key();
+    let long = Change::Admit { id: stranger.public(), name: "x".repeat(10_000) };
+    junk.log.insert(Signed::new(&r.network, &admin, 5, long));
+    let dotted = Change::Admit { id: key().public(), name: "a.b".into() };
+    junk.log.insert(Signed::new(&r.network, &admin, 5, dotted));
+    assert!(!r.merge(&junk), "nothing out of bounds counts");
+    assert_eq!(r.members().len(), 3);
+    assert!(serde_json::to_vec(&r).unwrap().len() < size + 1024);
+    // Its own location is cut to what one may hold, and counts.
+    r.sign(&laptop, 6, Change::locate(huge)).unwrap();
+    assert_eq!(r.members()[&laptop.public()].addr.addrs.len(), MAX_ADDRS);
+    // Once laptop is removed, where it was goes too.
+    r.sign(&desk, 7, Change::Remove { id: laptop.public(), cascade: false }).unwrap();
+    assert!(!r.log.iter().any(|s| s.by == laptop.public() && matches!(s.change, Change::Locate { .. })));
+}
+
+#[test]
 fn a_stolen_member_cannot_grow_the_log() {
     let (desk, laptop) = (key(), key());
     let (mut r, _) = Roster::create(&desk, "desk".into(), addr(&desk), 1);

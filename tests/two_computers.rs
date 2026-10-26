@@ -339,3 +339,16 @@ async fn an_unlisted_sender_asks_and_hears_back_but_isnt_offered() {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+#[tokio::test]
+async fn an_invite_carries_the_networks_name() {
+    let dir = temp_dir("named");
+    let (desk, _) = Node::start(&dir, &Connector::Private).await.unwrap();
+    desk.create("desk").unwrap();
+    assert_eq!(codync_network::read_invite(&desk.invite().unwrap()).unwrap().name, None);
+    desk.set_network_name(Some("home".into()));
+    let read = codync_network::read_invite(&desk.invite().unwrap()).unwrap();
+    assert_eq!((read.name.as_deref(), Some(read.network)), (Some("home"), desk.network_id()));
+    desk.shutdown().await;
+    let _ = std::fs::remove_dir_all(dir);
+}

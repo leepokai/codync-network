@@ -65,6 +65,8 @@ struct Inner {
     inbox: mpsc::Sender<Message>,
     /// The command an agent the network knocks on runs to answer.
     reply_command: Mutex<String>,
+    /// What the app calls this network; invites carry it (`set_network_name`).
+    network_name: Mutex<Option<String>>,
     /// Ticks when the members, their roles or names, or what the others offer or whether they
     /// answer, change.
     changed: watch::Sender<()>,
@@ -100,6 +102,7 @@ impl Node {
             outbox: Mutex::default(),
             inbox: tx,
             reply_command: Mutex::new("codync-network".into()),
+            network_name: Mutex::default(),
             changed: watch::Sender::new(()),
         });
         let router = Router::builder(endpoint).accept(ALPN, inbound::Handler(inner.clone())).spawn();
@@ -119,6 +122,11 @@ impl Node {
     /// This computer's name, once it is in a network.
     pub fn name(&self) -> Option<String> {
         locked(&self.inner.roster).as_ref().map(|r| r.name(&self.id()))
+    }
+
+    /// The network's id (its root key), once this computer is in one.
+    pub fn network_id(&self) -> Option<String> {
+        locked(&self.inner.roster).as_ref().map(|r| r.network.to_string())
     }
 
     pub fn role(&self) -> Option<Role> {
@@ -147,7 +155,8 @@ impl Node {
         }
         let secret = wire::random_hex(16);
         locked(&self.inner.invites).insert(secret.clone(), Instant::now() + INVITE_FOR);
-        Ticket { network: roster.network, secret, addr: self.inner.endpoint.addr() }.encode()
+        let name = locked(&self.inner.network_name).clone();
+        Ticket { network: roster.network, secret, addr: self.inner.endpoint.addr(), name }.encode()
     }
 
     pub async fn join(&self, ticket: &str, name: &str) -> Result<()> {
@@ -248,6 +257,12 @@ impl Node {
         locked(&self.inner.rules).clone()
     }
 
+    /// What the app calls this network (`home`, `work`) when a computer is in several: the invites
+    /// it makes carry the name, so the computer that joins can call it the same ([`read_invite`]).
+    pub fn set_network_name(&self, name: Option<String>) {
+        *locked(&self.inner.network_name) = name;
+    }
+
     /// The command agents the network knocks on run to reply (default `codync-network`).
     pub fn set_reply_command(&self, command: impl Into<String>) {
         *locked(&self.inner.reply_command) = command.into();
@@ -338,7 +353,8 @@ impl Node {
         }
     }
 
-    pub async fn shutdown(self) {
+    /// Stops answering and closes the endpoint (leaving a network, or quitting).
+    pub async fn shutdown(&self) {
         let _ = self.router.shutdown().await;
     }
 }
@@ -478,6 +494,19 @@ impl Inner {
         }
         Ok(())
     }
+}
+
+/// What an invite says about its network, before joining it.
+pub struct InviteInfo {
+    /// The network's id (its root key), as [`Node::network_id`] gives it.
+    pub network: String,
+    /// What the inviting computer calls the network, if it named it.
+    pub name: Option<String>,
+}
+
+pub fn read_invite(invite: &str) -> Result<InviteInfo> {
+    let ticket = Ticket::decode(invite)?;
+    Ok(InviteInfo { network: ticket.network.to_string(), name: ticket.name })
 }
 
 /// Signs where this computer is again whenever its addresses change (a laptop that moved to

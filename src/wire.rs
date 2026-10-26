@@ -97,6 +97,9 @@ pub struct Ticket {
     pub network: EndpointId,
     pub secret: String,
     pub addr: EndpointAddr,
+    /// What the inviting computer calls the network, for a computer in several of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl Ticket {
@@ -168,7 +171,7 @@ mod tests {
     #[test]
     fn tickets_round_trip_and_reject_garbage() {
         let addr = EndpointAddr::new(iroh::SecretKey::generate().public());
-        let ticket = Ticket { network: addr.id, secret: random_hex(16), addr: addr.clone() };
+        let ticket = Ticket { network: addr.id, secret: random_hex(16), addr: addr.clone(), name: None };
         let text = ticket.encode().unwrap();
         let back = Ticket::decode(&format!("  {text}\n")).unwrap();
         assert_eq!((back.network, back.secret, back.addr), (ticket.network, ticket.secret, addr));

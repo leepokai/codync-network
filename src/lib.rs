@@ -15,16 +15,20 @@
 //!   the network knocks on Claude Code sessions and Codex threads itself.
 //! - **Budgets** ([`guard`]): nothing is sent unless an agent sends a letter or someone asks who
 //!   is around, and the receiving computer refuses long chains, bursts and repeats.
+//! - **Rules** ([`rules`]): the receiving computer decides which agents elsewhere may write to
+//!   which of its own; with none, every member may.
 
 pub mod guard;
 mod node;
 mod reach;
 mod roster;
+pub mod rules;
 mod types;
 mod wire;
 
 pub use node::{INVITE_FOR, Node};
 pub use reach::Reach;
 pub use roster::Role;
+pub use rules::{Access, Rule};
 pub use types::{Address, Connector, Letter, Message, Peer, Sent};
 pub use wire::{Agent, MAX_BODY};

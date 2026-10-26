@@ -276,3 +276,40 @@ fn roles_decide_who_invites_removes_and_promotes() {
     assert!(!Admin.removes(Admin) && !Admin.removes(Owner) && !Member.removes(Member));
     assert!(Owner.promotes(Member) && !Owner.promotes(Admin) && !Admin.promotes(Member));
 }
+
+#[tokio::test]
+async fn the_receiving_computers_rules_decide_but_answers_always_pass() {
+    use codync_network::{Access, Rule};
+    let (desk_dir, laptop_dir) = (temp_dir("desk7"), temp_dir("laptop7"));
+    let (desk, mut desk_inbox) = Node::start(&desk_dir, &Connector::Private).await.unwrap();
+    desk.create("desk").unwrap();
+    desk.set_agents([(agent("reviewer"), Reach::App), (agent("coder"), Reach::App)]);
+    let (laptop, mut laptop_inbox) = Node::start(&laptop_dir, &Connector::Private).await.unwrap();
+    laptop.set_agents([(agent("lead"), Reach::App), (agent("intern"), Reach::App)]);
+    laptop.join(&desk.invite().unwrap(), "laptop").await.unwrap();
+
+    // The desk asks the laptop's lead something before the laptop locks the desk out.
+    let ask = Letter::new("reviewer", to("lead@laptop"), "which branch?");
+    let asked = ask.id.clone();
+    desk.send(ask).await.unwrap();
+    next(&mut laptop_inbox).await;
+    desk.set_rules(vec![
+        Rule::new(Access::Allow, "lead@laptop", "reviewer").unwrap(),
+        Rule::new(Access::Deny, "*@laptop", "*").unwrap(),
+    ])
+    .unwrap();
+    laptop.send(Letter::new("lead", to("reviewer@desk"), "review this")).await.unwrap();
+    assert_eq!(next(&mut desk_inbox).await.body, "review this", "allowed by the first rule");
+    let refused = laptop.send(Letter::new("intern", to("coder@desk"), "hi")).await.unwrap_err();
+    assert_eq!(refused.to_string(), "desk refused it: coder doesn't take messages from intern@laptop");
+    // An answer to the desk's own question still gets in, whoever sends it.
+    let answer = Letter::new("intern", to("reviewer@desk"), "main").reply_to(asked);
+    assert_eq!(laptop.send(answer).await.unwrap(), Sent::Delivered);
+    assert_eq!(next(&mut desk_inbox).await.body, "main");
+    // A made-up answer doesn't.
+    let fake = Letter::new("intern", to("coder@desk"), "sneaky").reply_to("not-a-letter-of-yours");
+    assert!(laptop.send(fake).await.is_err());
+    for dir in [desk_dir, laptop_dir] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

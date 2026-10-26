@@ -4,6 +4,7 @@ use super::{Inner, check_name, locked};
 use crate::guard::digest;
 use crate::reach::Reach;
 use crate::roster::Change;
+use crate::rules;
 use crate::types::Message;
 use crate::wire::{self, Envelope, Request, Response};
 use anyhow::{Result, anyhow, bail};
@@ -91,6 +92,13 @@ impl Inner {
         // Without a network, only this computer's own agents write here.
         let roster = locked(&self.roster).clone();
         let name = |id: &EndpointId| roster.as_ref().map_or_else(|| "local".into(), |r| r.name(id));
+        // This computer's rules, for letters from the others that don't answer one of its own.
+        if peer != self.me()
+            && !self.answers(peer, envelope.reply_to.as_deref())
+            && !rules::allows(&locked(&self.rules), &name(&peer), &envelope.from, &envelope.to)
+        {
+            return refuse(format!("{} doesn't take messages from {}@{}", envelope.to, envelope.from, name(&peer)));
+        }
         let reach = locked(&self.agents).iter().find(|(a, _)| a.id == envelope.to).map(|(_, r)| r.clone());
         let reach = match reach {
             Some(reach) => reach,

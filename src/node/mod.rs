@@ -7,6 +7,7 @@ mod outbox;
 use crate::guard::{self, Guard};
 use crate::reach::{Held, Reach};
 use crate::roster::{self, Change, Role, Roster};
+use crate::rules::{self, Rule};
 use crate::types::{Address, Connector, Letter, Message, Peer, Sent};
 use crate::wire::{self, ALPN, Agent, Request, Response, Ticket};
 use anyhow::{Context, Result, anyhow, bail};
@@ -52,6 +53,10 @@ struct Inner {
     held: Mutex<Held>,
     /// Letters already taken, so a sender's retry isn't delivered twice.
     taken: Mutex<VecDeque<String>>,
+    /// Who may write to this computer's agents (`rules`).
+    rules: Mutex<Vec<Rule>>,
+    /// Letters this computer sent, newest kept, and to whom: an answer to one passes the rules.
+    asked: Mutex<VecDeque<(String, EndpointId)>>,
     outbox: Mutex<Vec<outbox::Queued>>,
     inbox: mpsc::Sender<Message>,
     /// The command an agent the network knocks on runs to answer.
@@ -85,6 +90,8 @@ impl Node {
             guard: Mutex::default(),
             held: Mutex::default(),
             taken: Mutex::default(),
+            rules: Mutex::default(),
+            asked: Mutex::default(),
             outbox: Mutex::default(),
             inbox: tx,
             reply_command: Mutex::new("codync-network".into()),
@@ -216,6 +223,19 @@ impl Node {
         }
     }
 
+    /// Who on the other computers may write to this computer's agents, the first match deciding.
+    /// Answers to this computer's own letters always pass, so a rule added while a request runs
+    /// doesn't strand it.
+    pub fn set_rules(&self, rules: Vec<Rule>) -> Result<()> {
+        rules::check_all(&rules)?;
+        *locked(&self.inner.rules) = rules;
+        Ok(())
+    }
+
+    pub fn rules(&self) -> Vec<Rule> {
+        locked(&self.inner.rules).clone()
+    }
+
     /// The command agents the network knocks on run to reply (default `codync-network`).
     pub fn set_reply_command(&self, command: impl Into<String>) {
         *locked(&self.inner.reply_command) = command.into();
@@ -275,6 +295,9 @@ impl Node {
         let local = id == self.id();
         let envelope = letter.seal(wire::now_ms());
         wire::check(&envelope)?;
+        if !local {
+            self.inner.asked(&envelope.id, id);
+        }
         let name = |id: &EndpointId| roster.as_ref().map_or_else(|| "this computer".into(), |r| r.name(id));
         let answer = if local {
             Ok(self.inner.take(id, envelope.clone()).await)
@@ -311,6 +334,19 @@ impl Inner {
 
     fn me(&self) -> EndpointId {
         self.endpoint.id()
+    }
+
+    fn asked(&self, letter: &str, to: EndpointId) {
+        let mut asked = locked(&self.asked);
+        if asked.len() >= HEARD_MAX {
+            asked.pop_front();
+        }
+        asked.push_back((letter.to_owned(), to));
+    }
+
+    /// Whether a letter from `peer` answers one this computer sent it.
+    pub(super) fn answers(&self, peer: EndpointId, reply_to: Option<&str>) -> bool {
+        reply_to.is_some_and(|id| locked(&self.asked).iter().any(|(sent, to)| sent == id && *to == peer))
     }
 
     fn hops_of(&self, letter: &str) -> Option<u8> {

@@ -4,7 +4,7 @@
 mod control;
 
 use anyhow::{Context, Result, anyhow, bail};
-use codync_network::{Address, Agent, Connector, Letter, Node, Reach, Sent};
+use codync_network::{Access, Address, Agent, Connector, Letter, Node, Reach, Rule, Sent};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -24,11 +24,15 @@ then, from any terminal or agent on this computer:
   agents                  this computer's agents
   promote <computer>      make a computer an admin (owner)
   remove <computer> [--cascade]  take a computer out for good (--cascade: and what it admitted)
-  recover <code>          make this computer the owner with the recovery code";
+  recover <code>          make this computer the owner with the recovery code
+  rules                   who on the other computers may write to agents here (first match decides)
+  rules allow|deny <agent@computer> <agent> [--first]  add a rule (* matches any; --first puts it on top)
+  rules remove <n>        take out rule n";
 
 /// The agent a person at this computer's terminal speaks as.
 const TERMINAL: &str = "terminal";
 const AGENTS_FILE: &str = "agents.json";
+const RULES_FILE: &str = "rules.json";
 
 #[derive(Clone, Serialize, Deserialize)]
 struct LocalAgent {
@@ -92,7 +96,8 @@ async fn daemon(dir: &Path, connector: &Connector, args: &[String]) -> Result<()
             if default_dir().as_deref() == Some(dir) { String::new() } else { format!(" --dir '{}'", dir.display()) };
         node.set_reply_command(format!("'{}'{dir_flag}", exe.display()));
     }
-    let daemon = Arc::new(Daemon { node, dir: dir.to_path_buf(), agents: Mutex::new(load_agents(dir)?) });
+    node.set_rules(load(dir, RULES_FILE)?)?;
+    let daemon = Arc::new(Daemon { node, dir: dir.to_path_buf(), agents: Mutex::new(load(dir, AGENTS_FILE)?) });
     daemon.offer();
     control::serve(dir, daemon.clone())?;
     println!("{name} is on ({}). Commands work here and from other terminals.", daemon.node.id().fmt_short());
@@ -133,6 +138,7 @@ impl Daemon {
         let notice = take_switch(&mut args, "--notice");
         let remove = take_switch(&mut args, "--remove");
         let cascade = take_switch(&mut args, "--cascade");
+        let first = take_switch(&mut args, "--first");
         match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
             ["invite"] => self.node.invite(),
             ["peers"] => self.peers().await,
@@ -169,12 +175,48 @@ impl Daemon {
                 self.node.promote(computer)?;
                 Ok(format!("{computer} is an admin"))
             }
+            ["rules"] => Ok(self.rules_listing()),
+            ["rules", "remove", n] => {
+                let mut rules = self.node.rules();
+                let i = n
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|i| (1..=rules.len()).contains(i))
+                    .ok_or_else(|| anyhow!("no rule {n}"))?;
+                rules.remove(i - 1);
+                self.set_rules(rules)
+            }
+            ["rules", access, from, to] => {
+                let rule = Rule::new(access.parse::<Access>()?, from, to)?;
+                let mut rules = self.node.rules();
+                if first {
+                    rules.insert(0, rule);
+                } else {
+                    rules.push(rule);
+                }
+                self.set_rules(rules)
+            }
             ["recover", ref code @ ..] if !code.is_empty() => {
                 self.node.recover(&code.join(""))?;
                 Ok("this computer is the owner now; remove the lost one".into())
             }
             _ => bail!("{USAGE}"),
         }
+    }
+
+    fn set_rules(&self, rules: Vec<Rule>) -> Result<String> {
+        codync_network::rules::check_all(&rules)?;
+        save(&self.dir, RULES_FILE, &rules)?;
+        self.node.set_rules(rules)?;
+        Ok(self.rules_listing())
+    }
+
+    fn rules_listing(&self) -> String {
+        let rules = self.node.rules();
+        if rules.is_empty() {
+            return "no rules: every computer in the network may write to every agent here".into();
+        }
+        rules.iter().enumerate().map(|(i, r)| format!("{:>3}  {r}", i + 1)).collect::<Vec<_>>().join("\n")
     }
 
     async fn peers(&self) -> Result<String> {
@@ -202,7 +244,7 @@ impl Daemon {
         let mut agents = self.agents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         agents.retain(|a| a.agent.id != id);
         agents.push(local);
-        save_agents(&self.dir, &agents)?;
+        save(&self.dir, AGENTS_FILE, &agents)?;
         drop(agents);
         self.offer();
         Ok(format!("{id} is on the network"))
@@ -215,7 +257,7 @@ impl Daemon {
         if agents.len() == before {
             bail!("no agent called {id} on this computer");
         }
-        save_agents(&self.dir, &agents)?;
+        save(&self.dir, AGENTS_FILE, &agents)?;
         drop(agents);
         self.offer();
         Ok(format!("{id} is off the network"))
@@ -250,16 +292,17 @@ fn default_dir() -> Option<PathBuf> {
     std::env::home_dir().map(|h| h.join(".codync-network"))
 }
 
-fn load_agents(dir: &Path) -> Result<Vec<LocalAgent>> {
-    match std::fs::read(dir.join(AGENTS_FILE)) {
-        Ok(bytes) => serde_json::from_slice(&bytes).context("agents.json is damaged"),
+/// A list kept in the node's folder (`agents.json`, `rules.json`); none yet is empty.
+fn load<T: serde::de::DeserializeOwned>(dir: &Path, file: &str) -> Result<Vec<T>> {
+    match std::fs::read(dir.join(file)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("{file} is damaged")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(e).context("couldn't read agents.json"),
+        Err(e) => Err(e).with_context(|| format!("couldn't read {file}")),
     }
 }
 
-fn save_agents(dir: &Path, agents: &[LocalAgent]) -> Result<()> {
-    std::fs::write(dir.join(AGENTS_FILE), serde_json::to_vec_pretty(agents)?).context("couldn't save agents.json")
+fn save<T: Serialize>(dir: &Path, file: &str, items: &[T]) -> Result<()> {
+    std::fs::write(dir.join(file), serde_json::to_vec_pretty(items)?).with_context(|| format!("couldn't save {file}"))
 }
 
 fn take_flag(args: &mut Vec<String>, flag: &str) -> Result<Option<String>> {
@@ -276,4 +319,20 @@ fn take_switch(args: &mut Vec<String>, switch: &str) -> bool {
     let before = args.len();
     args.retain(|a| a != switch);
     args.len() != before
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rules_are_kept_beside_the_agents() {
+        let dir = std::env::temp_dir().join(format!("codync-network-rules-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp folder");
+        assert_eq!(load::<Rule>(&dir, RULES_FILE).expect("none yet"), []);
+        let rules = vec![Rule::new(Access::Deny, "*@server", "*").expect("a rule")];
+        save(&dir, RULES_FILE, &rules).expect("saved");
+        assert_eq!(load::<Rule>(&dir, RULES_FILE).expect("read back"), rules);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

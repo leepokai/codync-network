@@ -167,7 +167,7 @@ impl Inner {
             .sign(key, wire::now_ms(), Change::Admit { id: peer, name })
             .map_err(|_| anyhow!("this computer can no longer invite: only the owner and admins can"))?;
         let welcome = Response::Welcome { roster: roster.clone() };
-        roster.save(&self.dir)?;
+        self.save(roster)?;
         drop(guard);
         self.saw(peer, Some(Vec::new()));
         tracing::info!(peer = %peer.fmt_short(), "a computer joined the network");

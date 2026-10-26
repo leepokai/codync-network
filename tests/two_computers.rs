@@ -232,3 +232,46 @@ async fn a_reply_reaches_an_agent_renamed_since_it_asked_and_carries_the_chain_o
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+#[tokio::test]
+async fn changes_tick_when_who_is_in_or_around_changes() {
+    let (desk_dir, laptop_dir) = (temp_dir("desk6"), temp_dir("laptop6"));
+    let (desk, _) = Node::start(&desk_dir, &Connector::Private).await.unwrap();
+    let mut changes = desk.changes();
+    desk.create("desk").unwrap();
+    assert!(changes.has_changed().unwrap(), "creating the network");
+    changes.mark_unchanged();
+
+    let (laptop, _) = Node::start(&laptop_dir, &Connector::Private).await.unwrap();
+    offer(&laptop, "coder");
+    laptop.join(&desk.invite().unwrap(), "laptop").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), changes.changed()).await.expect("a join within 5 s").unwrap();
+    desk.peers().await.unwrap();
+    changes.mark_unchanged();
+
+    // Asking again with nothing new is quiet.
+    desk.peers().await.unwrap();
+    assert!(!changes.has_changed().unwrap());
+    desk.promote("laptop").unwrap();
+    assert!(changes.has_changed().unwrap(), "a promotion");
+    changes.mark_unchanged();
+    offer(&laptop, "reviewer");
+    desk.peers().await.unwrap();
+    assert!(changes.has_changed().unwrap(), "what the laptop offers");
+    changes.mark_unchanged();
+    laptop.shutdown().await;
+    desk.peers().await.unwrap();
+    assert!(changes.has_changed().unwrap(), "the laptop went away");
+    assert!(!desk.directory()[1].online);
+    for dir in [desk_dir, laptop_dir] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn roles_decide_who_removes_and_promotes() {
+    use Role::{Admin, Member, Owner};
+    assert!(Owner.removes(Admin) && Owner.removes(Member) && Admin.removes(Member));
+    assert!(!Admin.removes(Admin) && !Admin.removes(Owner) && !Member.removes(Member));
+    assert!(Owner.promotes(Member) && !Owner.promotes(Admin) && !Admin.promotes(Member));
+}

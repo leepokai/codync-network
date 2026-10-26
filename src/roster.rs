@@ -34,6 +34,20 @@ pub enum Role {
     Owner,
 }
 
+impl Role {
+    /// Whether a computer with this role may remove one with `other`: the owner removes anyone,
+    /// admins remove plain members.
+    pub fn removes(self, other: Role) -> bool {
+        self == Role::Owner || (self == Role::Admin && other == Role::Member)
+    }
+
+    /// Whether a computer with this role may make one with `other` an admin: only the owner, and
+    /// only a plain member.
+    pub fn promotes(self, other: Role) -> bool {
+        self == Role::Owner && other == Role::Member
+    }
+}
+
 /// One computer in the network, as the log has it now.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Member {

@@ -8,6 +8,7 @@ use anyhow::{Result, anyhow, bail};
 use iroh::EndpointId;
 
 /// What a computer offered when it last answered, and whether the last try got through.
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct Seen {
     agents: Vec<Agent>,
     answered: bool,
@@ -20,13 +21,16 @@ impl Inner {
     /// Notes that `id` answered with `agents`, or (`None`) that it didn't.
     pub(super) fn saw(&self, id: EndpointId, agents: Option<Vec<Agent>>) {
         let mut seen = locked(&self.seen);
-        match agents {
-            Some(agents) => {
-                seen.insert(id, Seen { agents, answered: true });
-            }
-            None => {
-                seen.entry(id).or_insert(Seen { agents: Vec::new(), answered: false }).answered = false;
-            }
+        let changed = if let Some(agents) = agents {
+            let now = Seen { agents, answered: true };
+            seen.insert(id, now.clone()).is_none_or(|before| before != now)
+        } else {
+            let heard = seen.entry(id).or_insert(Seen { agents: Vec::new(), answered: false });
+            std::mem::replace(&mut heard.answered, false)
+        };
+        drop(seen);
+        if changed {
+            self.changed.send_replace(());
         }
     }
 

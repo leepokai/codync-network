@@ -23,7 +23,7 @@ mod roster;
 mod types;
 mod wire;
 
-pub use node::Node;
+pub use node::{INVITE_FOR, Node};
 pub use reach::Reach;
 pub use roster::Role;
 pub use types::{Address, Connector, Letter, Message, Peer, Sent};

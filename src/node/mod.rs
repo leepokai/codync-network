@@ -18,11 +18,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 
 const KEY_FILE: &str = "secret.key";
-const INVITE_FOR: Duration = Duration::from_hours(1);
+/// How long an invite stays good.
+pub const INVITE_FOR: Duration = Duration::from_hours(1);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Long enough for the other computer to knock on its agent's harness.
 const CALL_TIMEOUT: Duration = Duration::from_secs(20);
@@ -55,6 +56,9 @@ struct Inner {
     inbox: mpsc::Sender<Message>,
     /// The command an agent the network knocks on runs to answer.
     reply_command: Mutex<String>,
+    /// Ticks when the members, their roles or names, or what the others offer or whether they
+    /// answer, change.
+    changed: watch::Sender<()>,
 }
 
 fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -84,6 +88,7 @@ impl Node {
             outbox: Mutex::default(),
             inbox: tx,
             reply_command: Mutex::new("codync-network".into()),
+            changed: watch::Sender::new(()),
         });
         let router = Router::builder(endpoint).accept(ALPN, inbound::Handler(inner.clone())).spawn();
         settle(&inner.endpoint, connector).await;
@@ -116,7 +121,7 @@ impl Node {
         }
         let key = self.inner.endpoint.secret_key();
         let (new, root) = Roster::create(key, check_name(name)?, self.inner.endpoint.addr(), wire::now_ms());
-        new.save(&self.inner.dir)?;
+        self.inner.save(&new)?;
         *roster = Some(new);
         Ok(roster::recovery_code(&root))
     }
@@ -152,7 +157,7 @@ impl Node {
                 // Where this computer is; nothing to add when it knows no address yet.
                 let addr = self.inner.endpoint.addr();
                 let _ = roster.sign(self.inner.endpoint.secret_key(), wire::now_ms(), Change::Locate { addr });
-                roster.save(&self.inner.dir)?;
+                self.inner.save(&roster)?;
                 *locked(&self.inner.roster) = Some(roster);
                 self.inner.clone().hello_all();
                 Ok(())
@@ -189,18 +194,20 @@ impl Node {
         }
         let name = roster.name(&self.id());
         roster.sign(&root, wire::now_ms(), Change::Owner { id: self.id(), name })?;
-        roster.save(&self.inner.dir)?;
+        self.inner.save(roster)?;
         drop(guard);
         self.inner.clone().hello_all();
         Ok(())
     }
 
-    /// The agents this computer offers, and how each is reached. Others see them the next time
-    /// they ask.
     /// What this computer offers. The first call opens it to letters, and the others hear at once,
     /// so what waited for it while it started comes now.
     pub fn set_agents(&self, agents: impl IntoIterator<Item = (Agent, Reach)>) {
+        let before = self.inner.offered();
         *locked(&self.inner.agents) = agents.into_iter().collect();
+        if self.inner.offered() != before {
+            self.inner.changed.send_replace(());
+        }
         if !self.inner.ready.swap(true, Ordering::AcqRel) {
             self.inner.clone().hello_all();
         }
@@ -226,6 +233,13 @@ impl Node {
     /// Every computer in the network, as last heard, without asking anyone.
     pub fn directory(&self) -> Vec<Peer> {
         self.inner.directory()
+    }
+
+    /// Changes whenever what [`Node::directory`] shows does: a computer joins or leaves, a role
+    /// or name changes, another computer offers different agents, or it starts or stops
+    /// answering. Ticks only; read the directory for what changed.
+    pub fn changes(&self) -> watch::Receiver<()> {
+        self.inner.changed.subscribe()
     }
 
     /// Where a bare agent name or a full `agent@computer` points: this computer first, then the
@@ -321,7 +335,7 @@ impl Inner {
         let mut guard = locked(&self.roster);
         let roster = guard.as_mut().ok_or_else(|| anyhow!("this computer isn't in a network"))?;
         roster.sign(self.endpoint.secret_key(), wire::now_ms(), change).map_err(|_| anyhow!("{refused}"))?;
-        roster.save(&self.dir)?;
+        self.save(roster)?;
         drop(guard);
         self.clone().hello_all();
         Ok(())
@@ -336,7 +350,14 @@ impl Inner {
             return Ok(());
         }
         roster.sign(self.endpoint.secret_key(), wire::now_ms(), Change::Locate { addr })?;
-        roster.save(&self.dir)
+        self.save(roster)
+    }
+
+    /// Keeps `roster` on disk and tells whoever watches [`Node::changes`].
+    fn save(&self, roster: &Roster) -> Result<()> {
+        roster.save(&self.dir)?;
+        self.changed.send_replace(());
+        Ok(())
     }
 
     async fn connect(&self, id: EndpointId) -> Result<Connection> {
@@ -397,7 +418,7 @@ impl Inner {
         let mut guard = locked(&self.roster);
         let Some(mine) = guard.as_mut() else { return Ok(()) };
         if mine.merge(theirs) {
-            mine.save(&self.dir)?;
+            self.save(mine)?;
         }
         Ok(())
     }

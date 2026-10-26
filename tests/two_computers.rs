@@ -269,8 +269,9 @@ async fn changes_tick_when_who_is_in_or_around_changes() {
 }
 
 #[test]
-fn roles_decide_who_removes_and_promotes() {
+fn roles_decide_who_invites_removes_and_promotes() {
     use Role::{Admin, Member, Owner};
+    assert!(Owner.invites() && Admin.invites() && !Member.invites());
     assert!(Owner.removes(Admin) && Owner.removes(Member) && Admin.removes(Member));
     assert!(!Admin.removes(Admin) && !Admin.removes(Owner) && !Member.removes(Member));
     assert!(Owner.promotes(Member) && !Owner.promotes(Admin) && !Admin.promotes(Member));

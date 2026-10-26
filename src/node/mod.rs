@@ -129,7 +129,7 @@ impl Node {
     /// A one-time invite for another computer, good for an hour while this one stays on.
     pub fn invite(&self) -> Result<String> {
         let roster = self.inner.roster()?;
-        if roster.role(&self.id()) < Some(Role::Admin) {
+        if !roster.role(&self.id()).is_some_and(Role::invites) {
             bail!("only the owner and admins can invite computers");
         }
         let secret = wire::random_hex(16);
@@ -157,8 +157,11 @@ impl Node {
                 // Where this computer is; nothing to add when it knows no address yet.
                 let addr = self.inner.endpoint.addr();
                 let _ = roster.sign(self.inner.endpoint.secret_key(), wire::now_ms(), Change::Locate { addr });
+                // Held across saving and keeping it, so whoever `changes` wakes sees it.
+                let mut guard = locked(&self.inner.roster);
                 self.inner.save(&roster)?;
-                *locked(&self.inner.roster) = Some(roster);
+                *guard = Some(roster);
+                drop(guard);
                 self.inner.clone().hello_all();
                 Ok(())
             }
@@ -353,7 +356,8 @@ impl Inner {
         self.save(roster)
     }
 
-    /// Keeps `roster` on disk and tells whoever watches [`Node::changes`].
+    /// Keeps `roster` on disk and tells whoever watches [`Node::changes`]. Callers hold the roster
+    /// lock until `roster` is the one kept in memory, so a watcher woken here reads it.
     fn save(&self, roster: &Roster) -> Result<()> {
         roster.save(&self.dir)?;
         self.changed.send_replace(());

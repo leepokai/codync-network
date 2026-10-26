@@ -35,6 +35,11 @@ pub enum Role {
 }
 
 impl Role {
+    /// Whether a computer with this role may invite computers: the owner and admins.
+    pub fn invites(self) -> bool {
+        self >= Role::Admin
+    }
+
     /// Whether a computer with this role may remove one with `other`: the owner removes anyone,
     /// admins remove plain members.
     pub fn removes(self, other: Role) -> bool {

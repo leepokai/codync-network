@@ -23,6 +23,10 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 
+[dev-dependencies]
+# Moves a computer in tests: a watched address the test sets (iroh's own watcher type).
+n0-watcher = "1"
+
 # The TLS library under iroh. An app that already uses rustls with aws-lc-rs takes `tls-aws-lc-rs`
 # (with default-features = false): rustls can't pick a provider by itself when both are built in.
 [features]

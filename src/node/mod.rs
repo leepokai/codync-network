@@ -13,11 +13,11 @@ use crate::wire::{self, ALPN, Agent, Request, Response, Ticket};
 use anyhow::{Context, Result, anyhow, bail};
 use iroh::endpoint::{Connection, presets};
 use iroh::protocol::Router;
-use iroh::{Endpoint, EndpointId, RelayMode, RelayUrl, SecretKey};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, Watcher};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
@@ -29,6 +29,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Long enough for the other computer to knock on its agent's harness.
 const CALL_TIMEOUT: Duration = Duration::from_secs(20);
 const INBOX_SIZE: usize = 256;
+/// How long addresses get to settle after a change before this computer signs where it is.
+const ADDR_SETTLE: Duration = Duration::from_secs(2);
 /// Letters whose handoff count a reply may need, newest kept.
 const HEARD_MAX: usize = 1000;
 
@@ -99,10 +101,11 @@ impl Node {
         });
         let router = Router::builder(endpoint).accept(ALPN, inbound::Handler(inner.clone())).spawn();
         settle(&inner.endpoint, connector).await;
-        inner.refresh_my_addr()?;
+        inner.locate(inner.endpoint.addr())?;
         // Catch up with the others: a computer that was off may have missed a removal.
         inner.clone().hello_all();
         tokio::spawn(outbox::retry_loop(Arc::downgrade(&inner)));
+        tokio::spawn(follow_addr(Arc::downgrade(&inner), inner.endpoint.watch_addr()));
         Ok((Self { inner, router }, rx))
     }
 
@@ -380,16 +383,16 @@ impl Inner {
         Ok(())
     }
 
-    /// Writes this computer's current address into the roster when it moved.
-    fn refresh_my_addr(&self) -> Result<()> {
+    /// Writes where this computer is into the roster when it moved. Returns whether it did.
+    fn locate(&self, addr: EndpointAddr) -> Result<bool> {
         let mut guard = locked(&self.roster);
-        let Some(roster) = guard.as_mut() else { return Ok(()) };
-        let addr = self.endpoint.addr();
+        let Some(roster) = guard.as_mut() else { return Ok(false) };
         if roster.members().get(&self.me()).is_none_or(|m| m.addr == addr) {
-            return Ok(());
+            return Ok(false);
         }
         roster.sign(self.endpoint.secret_key(), wire::now_ms(), Change::Locate { addr })?;
-        self.save(roster)
+        self.save(roster)?;
+        Ok(true)
     }
 
     /// Keeps `roster` on disk and tells whoever watches [`Node::changes`]. Callers hold the roster
@@ -404,7 +407,7 @@ impl Inner {
         let addr = locked(&self.roster)
             .as_ref()
             .and_then(|r| r.members().get(&id).map(|m| m.addr.clone()))
-            .unwrap_or_else(|| iroh::EndpointAddr::new(id));
+            .unwrap_or_else(|| EndpointAddr::new(id));
         // ponytail: a new connection per call; keep them open when traffic makes setup cost show.
         Ok(tokio::time::timeout(CONNECT_TIMEOUT, self.endpoint.connect(addr, ALPN)).await??)
     }
@@ -461,6 +464,25 @@ impl Inner {
             self.save(mine)?;
         }
         Ok(())
+    }
+}
+
+/// Signs where this computer is again whenever its addresses change (a laptop that moved to
+/// another network) and tells the others, so they find it without a restart: with the `private`
+/// connector, nothing else would. The roster keeps only each computer's newest location.
+async fn follow_addr(inner: Weak<Inner>, mut addr: impl Watcher<Value = EndpointAddr>) {
+    while addr.updated().await.is_ok() {
+        // Addresses change in bursts (an interface comes up, then the relay answers): sign once.
+        tokio::time::sleep(ADDR_SETTLE).await;
+        let Some(inner) = inner.upgrade() else { return };
+        match inner.locate(addr.get()) {
+            Ok(true) => {
+                tracing::info!("this computer moved; telling the others");
+                inner.hello_all();
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(error = format!("{e:#}"), "couldn't sign where this computer is"),
+        }
     }
 }
 
@@ -522,4 +544,42 @@ fn check_name(name: &str) -> Result<String> {
         bail!("a computer's name is 1–40 characters, without spaces, /, @ or .");
     }
     Ok(name.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("codync-network-unit-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[tokio::test]
+    async fn a_computer_that_moves_tells_the_others_without_a_restart() {
+        let (desk_dir, laptop_dir) = (temp_dir("desk"), temp_dir("laptop"));
+        let (desk, _) = Node::start(&desk_dir, &Connector::Private).await.expect("desk starts");
+        desk.create("desk").expect("a network");
+        let (laptop, _) = Node::start(&laptop_dir, &Connector::Private).await.expect("laptop starts");
+        laptop.join(&desk.invite().expect("an invite"), "laptop").await.expect("joined");
+
+        // The laptop moves: an address it didn't have before.
+        let moved = laptop.inner.endpoint.addr().with_ip_addr("192.0.2.7:4242".parse().expect("an address"));
+        let watched = n0_watcher::Watchable::new(laptop.inner.endpoint.addr());
+        tokio::spawn(follow_addr(Arc::downgrade(&laptop.inner), watched.watch()));
+        watched.set(moved.clone()).expect("watched");
+        let desk_sees =
+            || locked(&desk.inner.roster).as_ref().and_then(|r| r.members().get(&laptop.id()).map(|m| m.addr.clone()));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while desk_sees() != Some(moved.clone()) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the desk hears where the laptop is now");
+        for dir in [desk_dir, laptop_dir] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 }

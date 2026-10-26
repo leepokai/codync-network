@@ -4,14 +4,17 @@ use crate::roster::Role;
 use crate::wire::{self, Agent, Envelope};
 use anyhow::{Result, anyhow, bail};
 use iroh::EndpointId;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::fmt;
 use std::str::FromStr;
 
-/// How computers reach each other when they can't connect directly.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// How computers reach each other when they can't connect directly. Written as `public`,
+/// `private` or the relay's URL, also in JSON.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Connector {
     /// iroh's public relays and address lookup. Free, rate-limited, meant for trying things out.
+    #[default]
     Public,
     /// Your own `iroh-relay`, and nothing of anyone else's.
     Relay(String),
@@ -29,6 +32,28 @@ impl FromStr for Connector {
             url if url.starts_with("https://") || url.starts_with("http://") => Ok(Self::Relay(url.into())),
             _ => bail!("connector is public, private or a relay URL"),
         }
+    }
+}
+
+impl fmt::Display for Connector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Public => f.write_str("public"),
+            Self::Private => f.write_str("private"),
+            Self::Relay(url) => f.write_str(url),
+        }
+    }
+}
+
+impl Serialize for Connector {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Connector {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        String::deserialize(d)?.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -160,4 +185,19 @@ pub enum Sent {
     Delivered,
     /// The computer is away; it gets the letter when it's back (within a day).
     Queued,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn connectors_read_and_write_as_text() {
+        for text in ["public", "private", "https://relay.example"] {
+            let connector: Connector = serde_json::from_value(json!(text)).unwrap();
+            assert_eq!(serde_json::to_value(&connector).unwrap(), text);
+        }
+        assert!(serde_json::from_value::<Connector>(json!("ftp://relay.example")).is_err());
+    }
 }

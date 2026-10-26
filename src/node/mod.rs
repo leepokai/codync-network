@@ -1,6 +1,7 @@
 //! One computer on the network: its iroh endpoint, its roster and the agents it offers.
 
 mod directory;
+mod endpoint;
 mod inbound;
 mod outbox;
 
@@ -11,27 +12,24 @@ use crate::rules::{self, Rule};
 use crate::types::{Address, Connector, Letter, Message, Peer, Sent};
 use crate::wire::{self, ALPN, Agent, Request, Response, Ticket};
 use anyhow::{Context, Result, anyhow, bail};
-use iroh::endpoint::{Connection, presets};
+use iroh::endpoint::Connection;
 use iroh::protocol::Router;
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, Watcher};
+use iroh::{Endpoint, EndpointAddr, EndpointId};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 
-const KEY_FILE: &str = "secret.key";
 /// How long an invite stays good.
 pub const INVITE_FOR: Duration = Duration::from_hours(1);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Long enough for the other computer to knock on its agent's harness.
 const CALL_TIMEOUT: Duration = Duration::from_secs(20);
 const INBOX_SIZE: usize = 256;
-/// How long addresses get to settle after a change before this computer signs where it is.
-const ADDR_SETTLE: Duration = Duration::from_secs(2);
-/// Letters whose handoff count a reply may need, newest kept.
+/// Letters whose handoff count a reply may need, and requests an answer may come back to, newest kept.
 const HEARD_MAX: usize = 1000;
 
 pub struct Node {
@@ -59,8 +57,9 @@ struct Inner {
     taken: Mutex<VecDeque<String>>,
     /// Who may write to this computer's agents (`rules`).
     rules: Mutex<Vec<Rule>>,
-    /// Requests this computer sent, newest kept, and to whom: an answer to one passes the rules.
-    asked: Mutex<VecDeque<(String, EndpointId)>>,
+    /// Requests this computer sent, newest kept: the letter's id, the computer it went to and
+    /// the agent here that sent it. That computer's answer to that agent passes the rules.
+    asked: Mutex<VecDeque<(String, EndpointId, String)>>,
     outbox: Mutex<Vec<outbox::Queued>>,
     inbox: mpsc::Sender<Message>,
     /// The command an agent the network knocks on runs to answer.
@@ -81,8 +80,8 @@ impl Node {
     /// agents the app delivers to ([`Reach::App`]) come out of the returned inbox.
     pub async fn start(dir: &Path, connector: &Connector) -> Result<(Self, mpsc::Receiver<Message>)> {
         std::fs::create_dir_all(dir)?;
-        let key = load_key(dir)?;
-        let endpoint = bind(key, connector).await?;
+        let key = endpoint::load_key(dir)?;
+        let endpoint = endpoint::bind(key, connector).await?;
         let (tx, rx) = mpsc::channel(INBOX_SIZE);
         let inner = Arc::new(Inner {
             endpoint: endpoint.clone(),
@@ -106,12 +105,12 @@ impl Node {
             changed: watch::Sender::new(()),
         });
         let router = Router::builder(endpoint).accept(ALPN, inbound::Handler(inner.clone())).spawn();
-        settle(&inner.endpoint, connector).await;
+        endpoint::settle(&inner.endpoint, connector).await;
         inner.locate(inner.endpoint.addr())?;
         // Catch up with the others: a computer that was off may have missed a removal.
         inner.clone().hello_all();
         tokio::spawn(outbox::retry_loop(Arc::downgrade(&inner)));
-        tokio::spawn(follow_addr(Arc::downgrade(&inner), inner.endpoint.watch_addr()));
+        tokio::spawn(endpoint::follow_addr(Arc::downgrade(&inner), inner.endpoint.watch_addr()));
         Ok((Self { inner, router }, rx))
     }
 
@@ -258,7 +257,7 @@ impl Node {
     }
 
     /// What the app calls this network (`home`, `work`) when a computer is in several: the invites
-    /// it makes carry the name, so the computer that joins can call it the same ([`read_invite`]).
+    /// it makes carry the name, so the computer that joins can call it the same ([`crate::read_invite`]).
     pub fn set_network_name(&self, name: Option<String>) {
         *locked(&self.inner.network_name) = name;
     }
@@ -327,7 +326,7 @@ impl Node {
         wire::check(&envelope)?;
         // A request, which an answer may come back to past the other computer's rules.
         if !local && envelope.wake && envelope.reply_to.is_none() {
-            self.inner.asked(&envelope.id, id);
+            remember(&mut locked(&self.inner.asked), (envelope.id.clone(), id, envelope.from.clone()), HEARD_MAX);
         }
         let name = |id: &EndpointId| roster.as_ref().map_or_else(|| "this computer".into(), |r| r.name(id));
         let answer = if local {
@@ -368,17 +367,11 @@ impl Inner {
         self.endpoint.id()
     }
 
-    fn asked(&self, letter: &str, to: EndpointId) {
-        let mut asked = locked(&self.asked);
-        if asked.len() >= HEARD_MAX {
-            asked.pop_front();
-        }
-        asked.push_back((letter.to_owned(), to));
-    }
-
-    /// Whether a letter from `peer` answers one this computer sent it.
-    pub(super) fn answers(&self, peer: EndpointId, reply_to: Option<&str>) -> bool {
-        reply_to.is_some_and(|id| locked(&self.asked).iter().any(|(sent, to)| sent == id && *to == peer))
+    /// Whether a letter from `peer` answers a request this computer sent there, from the agent
+    /// the letter is for.
+    pub(super) fn answers(&self, peer: EndpointId, envelope: &wire::Envelope) -> bool {
+        let Some(id) = envelope.reply_to.as_deref() else { return false };
+        locked(&self.asked).iter().any(|(sent, to, by)| sent == id && *to == peer && *by == envelope.to)
     }
 
     fn hops_of(&self, letter: &str) -> Option<u8> {
@@ -386,11 +379,7 @@ impl Inner {
     }
 
     fn heard(&self, letter: &str, hops: u8) {
-        let mut heard = locked(&self.heard);
-        if heard.len() >= HEARD_MAX {
-            heard.pop_front();
-        }
-        heard.push_back((letter.to_owned(), hops));
+        remember(&mut locked(&self.heard), (letter.to_owned(), hops), HEARD_MAX);
     }
 
     fn offered(&self) -> Vec<Agent> {
@@ -410,18 +399,6 @@ impl Inner {
         drop(guard);
         self.clone().hello_all();
         Ok(())
-    }
-
-    /// Writes where this computer is into the roster when it moved. Returns whether it did.
-    fn locate(&self, addr: EndpointAddr) -> Result<bool> {
-        let mut guard = locked(&self.roster);
-        let Some(roster) = guard.as_mut() else { return Ok(false) };
-        if roster.members().get(&self.me()).is_none_or(|m| m.addr == addr) {
-            return Ok(false);
-        }
-        roster.sign(self.endpoint.secret_key(), wire::now_ms(), Change::Locate { addr })?;
-        self.save(roster)?;
-        Ok(true)
     }
 
     /// Keeps `roster` on disk and tells whoever watches [`Node::changes`]. Callers hold the roster
@@ -496,90 +473,6 @@ impl Inner {
     }
 }
 
-/// What an invite says about its network, before joining it.
-pub struct InviteInfo {
-    /// The network's id (its root key), as [`Node::network_id`] gives it.
-    pub network: String,
-    /// What the inviting computer calls the network, if it named it.
-    pub name: Option<String>,
-}
-
-pub fn read_invite(invite: &str) -> Result<InviteInfo> {
-    let ticket = Ticket::decode(invite)?;
-    Ok(InviteInfo { network: ticket.network.to_string(), name: ticket.name })
-}
-
-/// Signs where this computer is again whenever its addresses change (a laptop that moved to
-/// another network) and tells the others, so they find it without a restart: with the `private`
-/// connector, nothing else would. The roster keeps only each computer's newest location.
-async fn follow_addr(inner: Weak<Inner>, mut addr: impl Watcher<Value = EndpointAddr>) {
-    while addr.updated().await.is_ok() {
-        // Addresses change in bursts (an interface comes up, then the relay answers): sign once.
-        tokio::time::sleep(ADDR_SETTLE).await;
-        let Some(inner) = inner.upgrade() else { return };
-        match inner.locate(addr.get()) {
-            Ok(true) => {
-                tracing::info!("this computer moved; telling the others");
-                inner.hello_all();
-            }
-            Ok(false) => {}
-            Err(e) => tracing::warn!(error = format!("{e:#}"), "couldn't sign where this computer is"),
-        }
-    }
-}
-
-async fn bind(key: SecretKey, connector: &Connector) -> Result<Endpoint> {
-    let builder = match connector {
-        Connector::Public => Endpoint::builder(presets::N0),
-        Connector::Relay(url) => {
-            let url: RelayUrl = url.parse().context("not a relay URL")?;
-            Endpoint::builder(presets::Minimal).relay_mode(RelayMode::custom([url]))
-        }
-        Connector::Private => Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
-    };
-    Ok(builder.secret_key(key).bind().await?)
-}
-
-/// Waits briefly until the endpoint knows its own addresses, so invites and the roster carry them.
-async fn settle(endpoint: &Endpoint, connector: &Connector) {
-    if *connector != Connector::Private {
-        let _ = tokio::time::timeout(Duration::from_secs(5), endpoint.online()).await;
-    }
-    let until = Instant::now() + Duration::from_secs(3);
-    while endpoint.addr().ip_addrs().next().is_none() && Instant::now() < until {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-fn load_key(dir: &Path) -> Result<SecretKey> {
-    let path = dir.join(KEY_FILE);
-    match std::fs::read(&path) {
-        Ok(bytes) => {
-            let bytes: [u8; 32] = bytes.try_into().map_err(|_| anyhow!("{} is damaged", path.display()))?;
-            Ok(SecretKey::from_bytes(&bytes))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let key = SecretKey::generate();
-            write_private(&path, &key.to_bytes())?;
-            Ok(key)
-        }
-        Err(e) => Err(e).context("couldn't read this computer's key"),
-    }
-}
-
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
-        file.write_all(bytes)?;
-    }
-    #[cfg(not(unix))]
-    std::fs::write(path, bytes)?;
-    Ok(())
-}
-
 fn check_name(name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() || name.len() > 40 || name.contains(['/', ' ', '@', '.']) {
@@ -588,40 +481,10 @@ fn check_name(name: &str) -> Result<String> {
     Ok(name.into())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("codync-network-unit-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
+/// Keeps `item` in a list of the newest `max`.
+fn remember<T>(list: &mut VecDeque<T>, item: T, max: usize) {
+    if list.len() >= max {
+        list.pop_front();
     }
-
-    #[tokio::test]
-    async fn a_computer_that_moves_tells_the_others_without_a_restart() {
-        let (desk_dir, laptop_dir) = (temp_dir("desk"), temp_dir("laptop"));
-        let (desk, _) = Node::start(&desk_dir, &Connector::Private).await.expect("desk starts");
-        desk.create("desk").expect("a network");
-        let (laptop, _) = Node::start(&laptop_dir, &Connector::Private).await.expect("laptop starts");
-        laptop.join(&desk.invite().expect("an invite"), "laptop").await.expect("joined");
-
-        // The laptop moves: an address it didn't have before.
-        let moved = laptop.inner.endpoint.addr().with_ip_addr("192.0.2.7:4242".parse().expect("an address"));
-        let watched = n0_watcher::Watchable::new(laptop.inner.endpoint.addr());
-        tokio::spawn(follow_addr(Arc::downgrade(&laptop.inner), watched.watch()));
-        watched.set(moved.clone()).expect("watched");
-        let desk_sees =
-            || locked(&desk.inner.roster).as_ref().and_then(|r| r.members().get(&laptop.id()).map(|m| m.addr.clone()));
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while desk_sees() != Some(moved.clone()) {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .expect("the desk hears where the laptop is now");
-        for dir in [desk_dir, laptop_dir] {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-    }
+    list.push_back(item);
 }

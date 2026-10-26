@@ -278,7 +278,7 @@ fn roles_decide_who_invites_removes_and_promotes() {
 }
 
 #[tokio::test]
-async fn the_receiving_computers_rules_decide_but_answers_always_pass() {
+async fn the_receiving_computers_rules_decide_but_answers_to_the_asker_pass() {
     use codync_network::{Access, Rule};
     let (desk_dir, laptop_dir) = (temp_dir("desk7"), temp_dir("laptop7"));
     let (desk, mut desk_inbox) = Node::start(&desk_dir, &Connector::Private).await.unwrap();
@@ -302,10 +302,17 @@ async fn the_receiving_computers_rules_decide_but_answers_always_pass() {
     assert_eq!(next(&mut desk_inbox).await.body, "review this", "allowed by the first rule");
     let refused = laptop.send(Letter::new("intern", to("coder@desk"), "hi")).await.unwrap_err();
     assert_eq!(refused.to_string(), "desk refused it: coder doesn't take messages from intern@laptop");
-    // An answer to the desk's own question still gets in, whoever sends it.
-    let answer = Letter::new("intern", to("reviewer@desk"), "main").reply_to(asked);
+    // An answer to the desk's own question still gets in, whoever sends it, but only to the
+    // agent that asked, and only until the one that says how it ended (`meta`).
+    let elsewhere = Letter::new("intern", to("coder@desk"), "main").reply_to(asked.clone());
+    assert!(laptop.send(elsewhere).await.is_err(), "coder didn't ask");
+    let answer = Letter::new("intern", to("reviewer@desk"), "main").reply_to(asked.clone());
     assert_eq!(laptop.send(answer).await.unwrap(), Sent::Delivered);
     assert_eq!(next(&mut desk_inbox).await.body, "main");
+    let last = Letter::new("intern", to("reviewer@desk"), "done").reply_to(asked.clone()).meta(serde_json::json!({}));
+    assert_eq!(laptop.send(last).await.unwrap(), Sent::Delivered);
+    assert_eq!(next(&mut desk_inbox).await.body, "done");
+    assert!(laptop.send(Letter::new("intern", to("reviewer@desk"), "more").reply_to(asked)).await.is_err());
     // A made-up answer doesn't.
     let fake = Letter::new("intern", to("coder@desk"), "sneaky").reply_to("not-a-letter-of-yours");
     assert!(laptop.send(fake).await.is_err());

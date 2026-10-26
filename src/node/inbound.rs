@@ -1,6 +1,6 @@
 //! What this computer answers: joins, hellos and letters for its agents.
 
-use super::{Inner, check_name, locked};
+use super::{Inner, check_name, locked, remember};
 use crate::guard::digest;
 use crate::reach::Reach;
 use crate::roster::Change;
@@ -89,12 +89,18 @@ impl Inner {
         if !self.ready.load(Ordering::Acquire) {
             return Response::Later { reason: "this computer is still starting".into() };
         }
+        let key = format!("{peer}:{}", envelope.id);
+        if locked(&self.taken).contains(&key) {
+            // The sender didn't hear back the first time; it was already delivered.
+            return Response::Stored;
+        }
         // Without a network, only this computer's own agents write here.
         let roster = locked(&self.roster).clone();
         let name = |id: &EndpointId| roster.as_ref().map_or_else(|| "local".into(), |r| r.name(id));
         // This computer's rules, for letters from the others that don't answer one of its own.
+        let answers = self.answers(peer, &envelope);
         if peer != self.me()
-            && !self.answers(peer, envelope.reply_to.as_deref())
+            && !answers
             && !rules::allows(&locked(&self.rules), &name(&peer), &envelope.from, &envelope.to)
         {
             return refuse(format!("{} doesn't take messages from {}@{}", envelope.to, envelope.from, name(&peer)));
@@ -107,11 +113,6 @@ impl Inner {
             None if envelope.reply_to.is_some() => Reach::App,
             None => return refuse(format!("{} has no agent called {}", name(&self.me()), envelope.to)),
         };
-        let key = format!("{peer}:{}", envelope.id);
-        if locked(&self.taken).contains(&key) {
-            // The sender didn't hear back the first time; it was already delivered.
-            return Response::Stored;
-        }
         let pair = format!("{peer}/{}>{}", envelope.from, envelope.to);
         let meta = envelope.meta.as_ref().map(ToString::to_string).unwrap_or_default();
         // Two answers to two different letters may well say the same thing ("Done.").
@@ -120,14 +121,15 @@ impl Inner {
             return refuse(reason);
         }
         let (id, hops) = (envelope.id.clone(), envelope.hops);
+        // An answer that says how the request ended (`meta`) is the last one past the rules.
+        let ended = envelope.reply_to.clone().filter(|_| answers && envelope.meta.is_some());
         match self.hand_over(&reach, envelope.open(name(&peer))).await {
             Ok(()) => {
                 self.heard(&id, hops);
-                let mut taken = locked(&self.taken);
-                if taken.len() >= TAKEN_MAX {
-                    taken.pop_front();
+                remember(&mut locked(&self.taken), key, TAKEN_MAX);
+                if let Some(request) = ended {
+                    locked(&self.asked).retain(|(sent, to, _)| *sent != request || *to != peer);
                 }
-                taken.push_back(key);
                 Response::Stored
             }
             Err(e) => {

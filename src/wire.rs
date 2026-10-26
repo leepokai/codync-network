@@ -114,6 +114,19 @@ impl Ticket {
     }
 }
 
+/// What an invite says about its network, before joining it.
+pub struct InviteInfo {
+    /// The network's id (its root key), as [`Node::network_id`](crate::Node::network_id) gives it.
+    pub network: String,
+    /// What the inviting computer calls the network, if it named it.
+    pub name: Option<String>,
+}
+
+pub fn read_invite(invite: &str) -> Result<InviteInfo> {
+    let ticket = Ticket::decode(invite)?;
+    Ok(InviteInfo { network: ticket.network.to_string(), name: ticket.name })
+}
+
 pub async fn call(conn: &Connection, request: &Request) -> Result<Response> {
     let (mut send, mut recv) = conn.open_bi().await?;
     send.write_all(&serde_json::to_vec(request)?).await?;

@@ -1,6 +1,6 @@
 //! Computers on this machine, connected directly (no relay, no internet).
 
-use codync_network::{Address, Agent, Connector, Letter, Message, Node, Reach, Role, Sent};
+use codync_network::{Address, Agent, AgentKind, Connector, Letter, Message, Node, Reach, Role, Sent};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc::Receiver;
@@ -12,7 +12,7 @@ fn temp_dir(name: &str) -> PathBuf {
 }
 
 fn agent(id: &str) -> Agent {
-    Agent { id: id.into(), name: id.into(), about: String::new() }
+    Agent { id: id.into(), name: id.into(), about: String::new(), kind: AgentKind::Codync }
 }
 
 fn offer(node: &Node, id: &str) {
@@ -358,4 +358,26 @@ async fn an_invite_carries_the_networks_name() {
     assert_eq!((read.name.as_deref(), Some(read.network)), (Some("home"), desk.network_id()));
     desk.shutdown().await;
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn a_session_the_network_knocks_on_is_offered_as_its_kind() {
+    let (desk_dir, laptop_dir) = (temp_dir("desk9"), temp_dir("laptop9"));
+    let (desk, _) = Node::start(&desk_dir, &Connector::Private).await.unwrap();
+    desk.create("desk").unwrap();
+    offer(&desk, "reviewer");
+    let (laptop, _) = Node::start(&laptop_dir, &Connector::Private).await.unwrap();
+    let session = Agent { id: "main".into(), name: "main".into(), about: String::new(), kind: AgentKind::Other };
+    laptop.set_agents([(session, Reach::ClaudeCode { session: "s1".into() })]);
+    laptop.join(&desk.invite().unwrap(), "laptop").await.unwrap();
+    let peers = desk.peers().await.unwrap();
+    assert_eq!(peers[0].agents[0].kind, AgentKind::Codync);
+    assert_eq!(peers[1].agents[0].kind, AgentKind::ClaudeCode, "its reach says what it is");
+    // A computer from before kinds says nothing, and a kind this version doesn't know reads as other.
+    let old: Agent = serde_json::from_str(r#"{"id": "x", "name": "x"}"#).unwrap();
+    let newer: Agent = serde_json::from_str(r#"{"id": "x", "name": "x", "kind": "gemini"}"#).unwrap();
+    assert_eq!((old.kind, newer.kind), (AgentKind::Other, AgentKind::Other));
+    for dir in [desk_dir, laptop_dir] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

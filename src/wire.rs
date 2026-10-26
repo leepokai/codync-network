@@ -25,6 +25,25 @@ pub struct Agent {
     /// What it is good at, so other agents pick the right one.
     #[serde(default)]
     pub about: String,
+    /// What it is, so others can pick one kind. Set from its [`Reach`](crate::Reach) for the
+    /// sessions the network knocks on itself.
+    #[serde(default)]
+    pub kind: AgentKind,
+}
+
+/// What kind of agent is offered: a Codync bot, a Claude Code session, a Codex thread, a person
+/// at a terminal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentKind {
+    Codync,
+    ClaudeCode,
+    Codex,
+    Terminal,
+    /// Not said (a computer from before kinds), or one this version doesn't know.
+    #[default]
+    #[serde(other)]
+    Other,
 }
 
 /// A letter on the wire. The sending computer is whoever opened the connection (iroh proves

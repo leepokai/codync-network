@@ -4,7 +4,7 @@
 mod control;
 
 use anyhow::{Context, Result, anyhow, bail};
-use codync_network::{Access, Address, Agent, Connector, Letter, Node, Reach, Rule, Sent};
+use codync_network::{Access, Address, Agent, AgentKind, Connector, Letter, Node, Reach, Rule, Sent};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -163,7 +163,9 @@ impl Daemon {
                     "codex" => Reach::Codex { thread: handle.into() },
                     _ => bail!("an agent is reached through claude or codex"),
                 };
-                let agent = Agent { id: id.into(), name: id.into(), about: about.unwrap_or_default() };
+                // The node makes it a Claude Code or Codex agent from its reach.
+                let agent =
+                    Agent { id: id.into(), name: id.into(), about: about.unwrap_or_default(), kind: AgentKind::Other };
                 self.add(LocalAgent { agent, reach })
             }
             ["agents"] => Ok(self.listing()),
@@ -279,7 +281,12 @@ impl Daemon {
 
     /// Tells the node what this computer offers: the terminal, then every registered agent.
     fn offer(&self) {
-        let terminal = Agent { id: TERMINAL.into(), name: "Terminal".into(), about: "A person at a terminal".into() };
+        let terminal = Agent {
+            id: TERMINAL.into(),
+            name: "Terminal".into(),
+            about: "A person at a terminal".into(),
+            kind: AgentKind::Terminal,
+        };
         let agents = self.agents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let offered = agents.iter().map(|a| (a.agent.clone(), a.reach.clone()));
         self.node.set_agents(std::iter::once((terminal, Reach::App)).chain(offered).collect::<Vec<_>>());

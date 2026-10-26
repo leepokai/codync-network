@@ -10,7 +10,7 @@ use crate::reach::{Held, Reach};
 use crate::roster::{self, Change, Role, Roster};
 use crate::rules::{self, Rule};
 use crate::types::{Address, Connector, Letter, Message, Peer, Sent};
-use crate::wire::{self, ALPN, Agent, Request, Response, Ticket};
+use crate::wire::{self, ALPN, Agent, AgentKind, Request, Response, Ticket};
 use anyhow::{Context, Result, anyhow, bail};
 use iroh::endpoint::Connection;
 use iroh::protocol::Router;
@@ -228,7 +228,16 @@ impl Node {
     /// so what waited for it while it started comes now.
     pub fn set_agents(&self, agents: impl IntoIterator<Item = (Agent, Reach)>) {
         let before = self.inner.offered();
-        *locked(&self.inner.agents) = agents.into_iter().collect();
+        // A session the network knocks on is the kind its harness is, whatever the app said.
+        let agents = agents.into_iter().map(|(mut agent, reach)| {
+            match reach {
+                Reach::ClaudeCode { .. } => agent.kind = AgentKind::ClaudeCode,
+                Reach::Codex { .. } => agent.kind = AgentKind::Codex,
+                Reach::App => {}
+            }
+            (agent, reach)
+        });
+        *locked(&self.inner.agents) = agents.collect();
         if self.inner.offered() != before {
             self.inner.changed.send_replace(());
         }

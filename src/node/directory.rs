@@ -23,7 +23,7 @@ const MAX_AGENT_NAME: usize = 80;
 const MAX_ABOUT: usize = 1024;
 
 /// Another computer's agents within bounds: the first [`MAX_AGENTS`] with an id a letter can
-/// carry, their names and descriptions cut to length.
+/// carry ([`wire::MAX_ADDRESS`](crate::wire::MAX_ADDRESS)), their names and descriptions cut to length.
 fn bounded(agents: Vec<Agent>) -> Vec<Agent> {
     let cut = |text: &mut String, max: usize| {
         if text.len() > max {
@@ -33,7 +33,7 @@ fn bounded(agents: Vec<Agent>) -> Vec<Agent> {
     };
     agents
         .into_iter()
-        .filter(|a| !a.id.is_empty() && a.id.len() <= crate::wire::MAX_ID)
+        .filter(|a| !a.id.is_empty() && a.id.len() <= crate::wire::MAX_ADDRESS)
         .take(MAX_AGENTS)
         .map(|mut a| {
             cut(&mut a.name, MAX_AGENT_NAME);
@@ -130,12 +130,15 @@ mod tests {
     #[test]
     fn another_computers_offer_is_cut_to_bounds() {
         let agent = |id: String, name: String, about: String| Agent { id, name, about, kind: AgentKind::Codync };
-        let mut offer = vec![agent("x".repeat(65), "an id no letter carries".into(), String::new())];
+        let mut offer = vec![agent("x".repeat(257), "an id no letter carries".into(), String::new())];
+        // Forty characters of any script is an address name a letter carries.
+        offer.push(agent("審".repeat(40), "審計".into(), String::new()));
         offer.extend((0..300).map(|n| agent(format!("bot-{n}"), "é".repeat(100), "a".repeat(5000))));
         let kept = bounded(offer);
         assert_eq!(kept.len(), MAX_AGENTS);
-        assert_eq!(kept[0].id, "bot-0");
-        assert!(kept[0].name.len() <= MAX_AGENT_NAME && kept[0].name.chars().all(|c| c == 'é'));
-        assert_eq!(kept[0].about.len(), MAX_ABOUT);
+        assert_eq!(kept[0].id, "審".repeat(40));
+        assert_eq!(kept[1].id, "bot-0");
+        assert!(kept[1].name.len() <= MAX_AGENT_NAME && kept[1].name.chars().all(|c| c == 'é'));
+        assert_eq!(kept[1].about.len(), MAX_ABOUT);
     }
 }

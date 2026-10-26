@@ -14,8 +14,9 @@ use std::fmt::Write;
 pub const ALPN: &[u8] = b"codync-network/0";
 pub const MAX_BODY: usize = 64 * 1024;
 const MAX_META: usize = 16 * 1024;
-/// The longest `from`, `to` and `reply_to`: an agent's address name (or `agent-<name>`), a letter id.
-const MAX_ADDRESS: usize = 128;
+/// The longest `from`, `to` and `reply_to` in bytes: an agent's address name (40 characters of
+/// any script, a number, `agent-`), a letter id.
+pub const MAX_ADDRESS: usize = 256;
 /// The longest letter id (`random_hex(12)` makes 24).
 pub(crate) const MAX_ID: usize = 64;
 const MAX_FRAME: usize = 1024 * 1024;
@@ -226,6 +227,7 @@ mod tests {
         };
         assert!(check(&letter(&random_hex(12), "agent-lead".into())).is_ok());
         assert!(check(&letter(&random_hex(12), "x".repeat(1 << 20))).is_err());
+        assert!(check(&letter(&random_hex(12), "審".repeat(40))).is_ok(), "any script's address names");
         assert!(check(&letter(&"a".repeat(100), "lead".into())).is_err());
         assert!(check(&letter("", "lead".into())).is_err());
         let mut reply = letter(&random_hex(12), "lead".into());

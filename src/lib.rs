@@ -31,4 +31,4 @@ pub use reach::Reach;
 pub use roster::Role;
 pub use rules::{Access, Rule};
 pub use types::{Address, Connector, Letter, Message, Peer, Sent};
-pub use wire::{Agent, AgentKind, InviteInfo, MAX_BODY, read_invite};
+pub use wire::{Agent, AgentKind, InviteInfo, MAX_ADDRESS, MAX_BODY, read_invite};

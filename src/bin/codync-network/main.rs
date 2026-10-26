@@ -163,9 +163,8 @@ impl Daemon {
                     "codex" => Reach::Codex { thread: handle.into() },
                     _ => bail!("an agent is reached through claude or codex"),
                 };
-                // The node makes it a Claude Code or Codex agent from its reach.
-                let agent =
-                    Agent { id: id.into(), name: id.into(), about: about.unwrap_or_default(), kind: AgentKind::Other };
+                let kind = reach.kind().unwrap_or_default();
+                let agent = Agent { id: id.into(), name: id.into(), about: about.unwrap_or_default(), kind };
                 self.add(LocalAgent { agent, reach })
             }
             ["agents"] => Ok(self.listing()),

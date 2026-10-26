@@ -137,11 +137,11 @@ point two nodes at one folder.
 ## Use
 
 ```rust
-use codync_network::{Address, Agent, Connector, Letter, Node, Reach};
+use codync_network::{Address, Agent, AgentKind, Connector, Letter, Node, Reach};
 
 let (node, mut inbox) = Node::start(dir, &Connector::Public).await?;
 node.join(invite, "laptop").await?;
-let coder = Agent { id: "coder".into(), name: "Coder".into(), about: "Writes the code".into() };
+let coder = Agent { id: "coder".into(), name: "Coder".into(), about: "Writes the code".into(), kind: AgentKind::Codync };
 node.set_agents([(coder, Reach::App)]);
 
 let to: Address = "reviewer@desk".parse()?;
@@ -151,6 +151,9 @@ while let Some(message) = inbox.recv().await {
     println!("{} → {}: {}", message.from, message.to, message.body);
 }
 ```
+
+An agent's `kind` (`AgentKind`: Codync, ClaudeCode, Codex, Terminal, Other) says what it is, so others can pick one
+kind; `set_agents` sets it to ClaudeCode or Codex for a `Reach::ClaudeCode` or `Reach::Codex` agent.
 
 `node.changes()` ticks whenever `node.directory()` would show something new (a computer joins or leaves, a role,
 name or presence changes, another computer offers different agents), for an app that shows the network live.

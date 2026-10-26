@@ -7,6 +7,7 @@
 //! the next message that wakes the agent.
 
 use crate::types::Message;
+use crate::wire::AgentKind;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -32,6 +33,15 @@ pub enum Reach {
 }
 
 impl Reach {
+    /// The kind of agent a session the network knocks on is; `None` for the app's own.
+    pub fn kind(&self) -> Option<AgentKind> {
+        match self {
+            Self::App => None,
+            Self::ClaudeCode { .. } => Some(AgentKind::ClaudeCode),
+            Self::Codex { .. } => Some(AgentKind::Codex),
+        }
+    }
+
     /// Hands `messages` (held notices first) to the agent's harness.
     pub async fn knock(&self, messages: &[Message], reply_command: &str) -> Result<()> {
         let text = as_text(messages, reply_command);

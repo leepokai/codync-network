@@ -59,7 +59,7 @@ struct Inner {
     taken: Mutex<VecDeque<String>>,
     /// Who may write to this computer's agents (`rules`).
     rules: Mutex<Vec<Rule>>,
-    /// Letters this computer sent, newest kept, and to whom: an answer to one passes the rules.
+    /// Requests this computer sent, newest kept, and to whom: an answer to one passes the rules.
     asked: Mutex<VecDeque<(String, EndpointId)>>,
     outbox: Mutex<Vec<outbox::Queued>>,
     inbox: mpsc::Sender<Message>,
@@ -310,7 +310,8 @@ impl Node {
         let local = id == self.id();
         let envelope = letter.seal(wire::now_ms());
         wire::check(&envelope)?;
-        if !local {
+        // A request, which an answer may come back to past the other computer's rules.
+        if !local && envelope.wake && envelope.reply_to.is_none() {
             self.inner.asked(&envelope.id, id);
         }
         let name = |id: &EndpointId| roster.as_ref().map_or_else(|| "this computer".into(), |r| r.name(id));

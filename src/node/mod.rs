@@ -44,6 +44,8 @@ struct Inner {
     dir: PathBuf,
     roster: Mutex<Option<Roster>>,
     agents: Mutex<Vec<(Agent, Reach)>>,
+    /// Names the app also sends as without offering them (`set_senders`).
+    senders: Mutex<Vec<String>>,
     /// The app offered its agents since the node started: until then, letters wait at the sender.
     ready: AtomicBool,
     /// The handoff count of letters taken here, by id, so a reply carries the chain on.
@@ -85,6 +87,7 @@ impl Node {
             dir: dir.to_path_buf(),
             roster: Mutex::new(Roster::load(dir)?),
             agents: Mutex::default(),
+            senders: Mutex::default(),
             ready: AtomicBool::new(false),
             heard: Mutex::default(),
             seen: Mutex::default(),
@@ -226,6 +229,12 @@ impl Node {
         }
     }
 
+    /// Names the app sends letters as without offering them to the network: a hosted assistant that
+    /// asks agents elsewhere but can't be asked itself. Answers to its letters still come back.
+    pub fn set_senders(&self, senders: impl IntoIterator<Item = String>) {
+        *locked(&self.inner.senders) = senders.into_iter().collect();
+    }
+
     /// Who on the other computers may write to this computer's agents, the first match deciding.
     /// Answers to this computer's own letters always pass, so a rule added while a request runs
     /// doesn't strand it.
@@ -277,7 +286,10 @@ impl Node {
     /// Sends a letter from one of the agents this computer offers. An answer (`reply_to`) may also
     /// come from one it no longer offers: renamed or gone while it worked, it still says how it ended.
     pub async fn send(&self, letter: Letter) -> Result<Sent> {
-        if letter.reply_to.is_none() && !self.inner.offered().iter().any(|a| a.id == letter.from) {
+        let sender = |from: &str| {
+            self.inner.offered().iter().any(|a| a.id == from) || locked(&self.inner.senders).iter().any(|s| s == from)
+        };
+        if letter.reply_to.is_none() && !sender(&letter.from) {
             bail!("{} isn't one of this computer's agents", letter.from);
         }
         // A reply carries on the chain of the letter it answers (one more handoff).

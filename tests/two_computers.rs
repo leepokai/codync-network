@@ -313,3 +313,29 @@ async fn the_receiving_computers_rules_decide_but_answers_always_pass() {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+#[tokio::test]
+async fn an_unlisted_sender_asks_and_hears_back_but_isnt_offered() {
+    let (desk_dir, laptop_dir) = (temp_dir("desk8"), temp_dir("laptop8"));
+    let (desk, mut desk_inbox) = Node::start(&desk_dir, &Connector::Private).await.unwrap();
+    desk.create("desk").unwrap();
+    offer(&desk, "reviewer");
+    desk.set_senders(["assistant".to_owned()]);
+    let (laptop, mut laptop_inbox) = Node::start(&laptop_dir, &Connector::Private).await.unwrap();
+    offer(&laptop, "coder");
+    laptop.join(&desk.invite().unwrap(), "laptop").await.unwrap();
+
+    let ask = Letter::new("assistant", to("coder@laptop"), "status?");
+    let asked = ask.id.clone();
+    desk.send(ask).await.unwrap();
+    let got = next(&mut laptop_inbox).await;
+    assert_eq!(got.from, to("assistant@desk"));
+    laptop.send(Letter::new("coder", got.from, "all green").reply_to(asked)).await.unwrap();
+    assert_eq!(next(&mut desk_inbox).await.body, "all green");
+    let offered: Vec<String> = laptop.peers().await.unwrap()[1].agents.iter().map(|a| a.id.clone()).collect();
+    assert_eq!(offered, ["reviewer"], "the assistant isn't listed");
+    assert!(desk.send(Letter::new("nobody", to("coder@laptop"), "hi")).await.is_err());
+    for dir in [desk_dir, laptop_dir] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

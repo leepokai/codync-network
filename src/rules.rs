@@ -50,8 +50,14 @@ impl Rule {
     }
 
     fn check(&self) -> Result<()> {
-        for part in [&self.from_computer, &self.from_agent, &self.to_agent] {
-            if part.is_empty() || part.len() > 64 || part.contains(char::is_whitespace) {
+        // An agent's address name is up to 40 characters of any script, as long as a letter carries.
+        let parts = [
+            (&self.from_computer, 64),
+            (&self.from_agent, crate::wire::MAX_ADDRESS),
+            (&self.to_agent, crate::wire::MAX_ADDRESS),
+        ];
+        for (part, max) in parts {
+            if part.is_empty() || part.len() > max || part.contains(char::is_whitespace) {
                 bail!("each part of a rule is a name or *, without spaces");
             }
         }
@@ -125,6 +131,8 @@ mod tests {
         assert_eq!(r.to_string(), "deny *@server → *");
         assert!(Rule::new(Access::Allow, "lead", "x").is_err(), "a bare agent needs its computer");
         assert!(Rule::new(Access::Allow, "a b@c", "x").is_err());
+        let long = "審".repeat(40);
+        assert!(Rule::new(Access::Allow, &format!("{long}@desk"), &long).is_ok(), "any script's address names");
         assert!(check_all(&vec![r; MAX_RULES + 1]).is_err());
         let json = serde_json::to_value(rule(Access::Allow, "lead@desk", "reviewer")).expect("serializes");
         assert_eq!(json["access"], "allow");

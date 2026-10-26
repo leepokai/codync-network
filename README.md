@@ -140,6 +140,9 @@ while let Some(message) = inbox.recv().await {
 }
 ```
 
+`node.changes()` ticks whenever `node.directory()` would show something new (a computer joins or leaves, a role,
+name or presence changes, another computer offers different agents), for an app that shows the network live.
+
 ## Build
 
 ```sh

@@ -225,9 +225,13 @@ async fn a_reply_reaches_an_agent_renamed_since_it_asked_and_carries_the_chain_o
     laptop.send(Letter::new("reviewer", to("lead@desk"), "looks good").reply_to(asked.clone())).await.unwrap();
     let reply = next(&mut desk_inbox).await;
     assert_eq!((reply.reply_to.as_deref(), reply.hops), (Some(asked.as_str()), 4));
-    // A new letter (no reply_to) for an agent that's gone is still refused.
+    // A new letter (no reply_to) for an agent that's gone is still refused, and so is an answer to
+    // something the desk never asked.
     let gone = laptop.send(Letter::new("reviewer", to("lead@desk"), "and another thing")).await.unwrap_err();
     assert!(gone.to_string().contains("no agent called lead"), "{gone}");
+    let made_up = Letter::new("reviewer", to("lead@desk"), "psst").reply_to("not-a-letter-of-yours");
+    let made_up = laptop.send(made_up).await.unwrap_err();
+    assert!(made_up.to_string().contains("no agent called lead"), "{made_up}");
     for dir in [desk_dir, laptop_dir] {
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -108,9 +108,10 @@ impl Inner {
         let reach = locked(&self.agents).iter().find(|(a, _)| a.id == envelope.to).map(|(_, r)| r.clone());
         let reach = match reach {
             Some(reach) => reach,
-            // An answer to an agent that has since been renamed or gone: the app knows its request
-            // by id and still takes it.
-            None if envelope.reply_to.is_some() => Reach::App,
+            // An answer to an agent that has since been renamed, gone or kept off the network: the
+            // app knows its request by id and still takes it. Only a real answer: one this
+            // computer asked for.
+            None if envelope.reply_to.is_some() && answers => Reach::App,
             None => return refuse(format!("{} has no agent called {}", name(&self.me()), envelope.to)),
         };
         let pair = format!("{peer}/{}>{}", envelope.from, envelope.to);

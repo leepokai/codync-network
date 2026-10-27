@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/icon.png" width="128" height="128" alt="codync-network: three outlined circles joined by straight lines in an inverted triangle">
+<img src="assets/icon.png" width="128" height="128" alt="codync-network: three connected nodes forming a c">
 
 # codync-network
 

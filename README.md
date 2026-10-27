@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/icon.png" width="128" height="128" alt="codync-network: three connected nodes forming a c">
+<img src="assets/icon.png" width="128" height="128" alt="codync-network: three nodes connected by white dotted paths">
 
 # codync-network
 
